@@ -1,0 +1,30 @@
+refresh_data:
+  name: Kickbase Daten aktualisieren
+  description: Ruft aktuelle Daten für ausgewählte Module oder alle Kickbase-Ligen ab (rein lesend).
+  fields:
+    league_id:
+      name: Liga-ID (optional)
+      description: Wenn angegeben, wird nur diese Liga aktualisiert.
+      example: "2609146"
+      selector:
+        text:
+    module:
+      name: Modul (optional)
+      description: Einzelnes Modul aktualisieren (leer lassen für alle aktiven Module).
+      selector:
+        select:
+          options:
+            - label: Liga, Budget & Tabelle
+              value: league_overview
+            - label: Kader & Aufstellung
+              value: squad_lineup
+            - label: Transfermarkt & Scouting
+              value: market_transfers
+            - label: Live-Spieltag & Bundesliga
+              value: live_matchday
+            - label: Aktivitäten-Feed & Erfolge
+              value: feed_achievements
+            - label: News & Prognosen
+              value: news_predictions
+            - label: Challenges & Lobby
+              value: challenges
