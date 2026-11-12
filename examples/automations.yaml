@@ -1,0 +1,52 @@
+# Beispiel-Automationen für Home Assistant + Kickbase Integration
+
+- alias: "Kickbase: Warnung bei negativem Budget vor Spieltag"
+  description: "Sendet eine Benachrichtigung, sobald das Budget im Minus liegt."
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.kickbase_meine_liga_budget_im_minus
+      to: "on"
+  action:
+    - service: notify.persistent_notification
+      data:
+        title: "⚠️ Kickbase Budget im Minus!"
+        message: >
+          Dein aktuelles Budget beträgt {{ states('sensor.kickbase_meine_liga_budget') }} €.
+          Bitte vor dem Spieltag ausgleichen!
+
+- alias: "Kickbase: Scout-Spieler auf dem Transfermarkt"
+  description: "Benachrichtigt sofort, wenn ein beobachteter Spieler auf den Markt kommt."
+  trigger:
+    - platform: event
+      event_type: kickbase_scouted_on_market
+  action:
+    - service: notify.persistent_notification
+      data:
+        title: "🔭 Scout-Alarm: {{ trigger.event.data.player_name }}"
+        message: >
+          {{ trigger.event.data.player_name }} ist für {{ trigger.event.data.price }} €
+          (Marktwert {{ trigger.event.data.market_value }} €) auf dem Transfermarkt!
+
+- alias: "Kickbase: Aufstellungs-Deadline Erinnerung (1 Stunde vorher)"
+  trigger:
+    - platform: template
+      value_template: >
+        {% set lock = state_attr('calendar.kickbase_meine_liga_spielplan_deadlines', 'start_time') %}
+        {{ lock is not none and (as_timestamp(lock) - now().timestamp()) <= 3600 and (as_timestamp(lock) - now().timestamp()) > 3500 }}
+  action:
+    - service: notify.persistent_notification
+      data:
+        title: "⏱ Kickbase Deadline in 1 Stunde!"
+        message: "Prüfe Formation, Budget und angeschlagene Spieler."
+
+- alias: "Kickbase: Live-Tor/Ereignis eines eigenen Spielers"
+  trigger:
+    - platform: event
+      event_type: kickbase_live_player_event
+  action:
+    - service: logbook.log
+      data:
+        name: Kickbase Live
+        message: >
+          Spieler {{ trigger.event.data.player_name }} (Minute {{ trigger.event.data.minute }}'):
+          Event-Code {{ trigger.event.data.event_type_id }}

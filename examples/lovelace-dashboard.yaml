@@ -1,0 +1,24 @@
+title: Kickbase Modular Dashboard
+views:
+  - title: Übersicht
+    path: kickbase-overview
+    icon: mdi:soccer
+    cards:
+      - type: custom:kickbase-overview-card
+        title: Mein Liga-Cockpit
+      - type: custom:kickbase-lineup-card
+        title: Startelf & Formation
+      - type: custom:kickbase-market-card
+        title: Transfermarkt & Scouts
+        limit: 12
+      - type: custom:kickbase-squad-card
+        title: Kader & Marktwerte
+        limit: 18
+      - type: custom:kickbase-standings-card
+        title: Liga-Tabelle & Battles
+      - type: custom:kickbase-live-card
+        title: Live-Spieltag & Bundesliga
+      - type: custom:kickbase-feed-news-card
+        title: Feed, News & Aufstellungsprognosen
+      - type: custom:kickbase-challenges-card
+        title: Challenges & Division Lobby
