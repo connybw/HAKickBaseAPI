@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 import socket
 import sys
+import tempfile
 import time
 import types
 from typing import Any
@@ -85,12 +87,14 @@ class FakeResponse:
         status: int = 200,
         json_data: Any = None,
         text_data: str | None = None,
+        bytes_data: bytes | None = None,
         headers: dict[str, str] | None = None,
         content_length: int | None = None,
     ) -> None:
         self.status = status
         self._json_data = json_data
         self._text_data = text_data
+        self._bytes_data = bytes_data
         self.headers = headers if headers is not None else {"Content-Type": "application/json"}
         self.content_length = content_length
 
@@ -109,6 +113,13 @@ class FakeResponse:
         if self._text_data is not None:
             return self._text_data
         return str(self._json_data or "")
+
+    async def read(self) -> bytes:
+        if self._bytes_data is not None:
+            return self._bytes_data
+        if self._text_data is not None:
+            return self._text_data.encode("utf-8")
+        return b""
 
 
 class FakeClientSession:
@@ -205,6 +216,7 @@ def install_stubs() -> None:
         vol.Required = _marker
         vol.Optional = _marker
         vol.In = lambda vals: vals
+        vol.Coerce = lambda tp: tp
         sys.modules["voluptuous"] = vol
 
     if "homeassistant" in sys.modules:
@@ -253,9 +265,19 @@ def install_stubs() -> None:
             self.services: dict[tuple[str, str], Any] = {}
 
         def async_register(
-            self, domain: str, service: str, handler: Any, schema: Any = None
+            self,
+            domain: str,
+            service: str,
+            handler: Any,
+            schema: Any = None,
+            supports_response: Any = None,
         ) -> None:
             self.services[(domain, service)] = handler
+
+    class SupportsResponse:
+        NONE = "none"
+        OPTIONAL = "optional"
+        ONLY = "only"
 
     class HttpComponent:
         def __init__(self) -> None:
@@ -290,13 +312,24 @@ def install_stubs() -> None:
         async def async_reload(self, entry_id: str) -> None:
             self.reloaded_ids.append(entry_id)
 
+    class ConfigDirectory:
+        def __init__(self, base_dir: Path | None = None) -> None:
+            self._base = base_dir or Path(tempfile.mkdtemp(prefix="kb_ha_cfg_"))
+
+        def path(self, *parts: str) -> str:
+            return str(self._base.joinpath(*parts))
+
     class HomeAssistant:
-        def __init__(self) -> None:
+        def __init__(self, config_dir: Path | None = None) -> None:
             self.data: dict[str, Any] = {}
             self.bus = EventBus()
             self.services = ServiceRegistry()
             self.http = HttpComponent()
             self.config_entries = ConfigEntriesManager()
+            self.config = ConfigDirectory(config_dir)
+
+        async def async_add_executor_job(self, target: Any, *args: Any) -> Any:
+            return target(*args)
 
     class ServiceCall:
         def __init__(self, data: dict[str, Any] | None = None) -> None:
@@ -307,6 +340,7 @@ def install_stubs() -> None:
 
     core.HomeAssistant = HomeAssistant
     core.ServiceCall = ServiceCall
+    core.SupportsResponse = SupportsResponse
     core.callback = callback
     sys.modules["homeassistant.core"] = core
 
@@ -483,6 +517,7 @@ def install_stubs() -> None:
 
     cv_mod = types.ModuleType("homeassistant.helpers.config_validation")
     cv_mod.string = str
+    cv_mod.boolean = bool
     sys.modules["homeassistant.helpers.config_validation"] = cv_mod
 
     aio_client = types.ModuleType("homeassistant.helpers.aiohttp_client")

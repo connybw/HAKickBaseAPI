@@ -10,7 +10,7 @@ refresh_data:
         text:
     module:
       name: Modul (optional)
-      description: Einzelnes Modul aktualisieren (leer lassen für alle aktiven Module).
+      description: Einzelnes Modul aktualisieren (leer lassen für kompletten Liga-Sync).
       selector:
         select:
           options:
@@ -28,3 +28,98 @@ refresh_data:
               value: news_predictions
             - label: Challenges & Lobby
               value: challenges
+
+sync_database:
+  name: Lokale Spieler-Datenbank synchronisieren
+  description: Führt sofort eine gebündelte Abfrage aller Transfermarkt-, eigenen und Manager-Spieler aus und aktualisiert SQLite sowie den Foto-Cache.
+  fields:
+    league_id:
+      name: Liga-ID (optional)
+      description: Wenn angegeben, wird nur diese Liga synchronisiert.
+      example: "2609146"
+      selector:
+        text:
+    force_details:
+      name: Kompletten Verlauf neu laden
+      description: Erzwingt auch die komplette Marktwert-Historie für bereits kürzlich synchronisierte Spieler.
+      default: false
+      selector:
+        boolean:
+
+get_player_history:
+  name: Lokalen Spieler-Verlauf & Status abrufen
+  description: Liest Marktwert-Verlauf, Status-Historie und Spielerdetails direkt aus der lokalen SQLite-Datenbank (0 API-Anfragen an Kickbase).
+  fields:
+    player_id:
+      name: Spieler-ID
+      description: Kickbase ID des Spielers.
+      required: true
+      example: "1234"
+      selector:
+        text:
+    league_id:
+      name: Liga-ID (optional)
+      description: Optional; Standard ist die primäre Liga.
+      selector:
+        text:
+    days:
+      name: Tage (optional)
+      description: Begrenzt den Marktwert-Verlauf auf die letzten N Tage.
+      selector:
+        number:
+          min: 1
+          max: 365
+          mode: box
+
+query_local_players:
+  name: Lokale Spieler-Datenbank durchsuchen
+  description: Filtert alle lokal gespeicherten Spieler nach Name, Scope oder Status ohne Kickbase-API-Anfragen.
+  fields:
+    league_id:
+      name: Liga-ID (optional)
+      description: Optional; Standard ist die primäre Liga.
+      selector:
+        text:
+    query:
+      name: Suchbegriff (optional)
+      description: Filtert nach Spielername oder Besitzer-Manager.
+      selector:
+        text:
+    scope:
+      name: Bereich (optional)
+      selector:
+        select:
+          options:
+            - label: Alle gespeicherten Spieler
+              value: all
+            - label: Mein Kader
+              value: my_squad
+            - label: Transfermarkt
+              value: market
+            - label: Kader anderer Manager
+              value: rival_squad
+            - label: Scout-Liste
+              value: scouted
+    status_severity:
+      name: Fitness-Status (optional)
+      selector:
+        select:
+          options:
+            - label: Alle Status
+              value: all
+            - label: Nur Probleme (Verletzt/Gesperrt/Angeschlagen)
+              value: issues
+            - label: Fit
+              value: ok
+            - label: Angeschlagen / Aufbau
+              value: warning
+            - label: Verletzt / Gesperrt
+              value: danger
+    limit:
+      name: Maximale Anzahl
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 500
+          mode: box

@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .const import MODULE_LEAGUE_OVERVIEW
 from .entity import build_account_device_info, build_league_device_info
 
 if TYPE_CHECKING:
@@ -49,13 +50,14 @@ async def async_setup_entry(
             entities.append(
                 KickbaseUrlImageEntity(
                     hass=hass,
-                    coordinator=lset.overview or runtime.account,
+                    coordinator=lset.sync or runtime.account,
                     unique_id=f"{entry.entry_id}_{lid}_league_logo",
                     name="Liga-Logo",
-                    image_url_fn=lambda d, lid=lid: (
-                        (d.get("league") or {}).get("image")
-                        if "league" in d
-                        else ((d.get("leagues") or {}).get(lid) or {}).get("image")
+                    image_url_fn=lambda d, lid=lid, fallback=league_info.get("image"): (
+                        ((d.get(MODULE_LEAGUE_OVERVIEW) or {}).get("league") or {}).get("image")
+                        or ((d.get("league") or {}).get("image") if "league" in d else None)
+                        or ((d.get("leagues") or {}).get(lid) or {}).get("image")
+                        or fallback
                     ),
                     device_info=build_league_device_info(
                         lid, lset.league_name, league_info.get("competition_name")

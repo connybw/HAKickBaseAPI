@@ -522,6 +522,18 @@ export function positionClass(posCode) {
   }
 }
 
+export function playerImg(p) {
+  return p?.local_image || p?.image || null;
+}
+
+export function teamImg(p) {
+  return p?.local_team_image || p?.team_image || null;
+}
+
+export function avatarImg(m) {
+  return m?.local_avatar || m?.avatar || null;
+}
+
 export function renderMarketValueChartSvg(series, width = 620, height = 170) {
   if (!Array.isArray(series) || series.length < 2) {
     return `<div class="kb-empty">Keine Marktwert-Historie verfügbar</div>`;
@@ -605,8 +617,8 @@ export function renderPitchHtml(players, formation = "4-4-2") {
                   <div class="kb-pitch-player" data-player-id="${escapeHtml(p.id)}">
                     <div class="kb-pitch-avatar-wrap ${cap} ${prob}">
                       ${
-                        p.image
-                          ? `<img src="${escapeHtml(p.image)}" alt="${escapeHtml(p.name)}" loading="lazy"/>`
+                        playerImg(p)
+                          ? `<img src="${escapeHtml(playerImg(p))}" alt="${escapeHtml(p.name)}" loading="lazy"/>`
                           : `<span>${escapeHtml((p.name || "?").slice(0, 2))}</span>`
                       }
                       <span class="kb-pitch-status ${escapeHtml(sev)}" title="${escapeHtml(
@@ -666,15 +678,32 @@ class KickbaseStore {
     return promise;
   }
 
-  async refresh(hass, { entryId, leagueId, module } = {}) {
+  async refresh(hass, { entryId, leagueId, module, forceDetails = false } = {}) {
     const msg = { type: "kickbase/refresh" };
     if (entryId) msg.entry_id = entryId;
     if (leagueId) msg.league_id = leagueId;
     if (module) msg.module = module;
+    if (forceDetails) msg.force_details = true;
     const data = await hass.callWS(msg);
     const key = `${entryId || "_"}:${leagueId || "_"}`;
     this._cache.set(key, { ts: Date.now(), data });
     return data;
+  }
+
+  async queryLocalPlayers(hass, { entryId, leagueId, query, scope, statusSeverity, limit = 120 } = {}) {
+    const msg = { type: "kickbase/query_local_players", league_id: leagueId, limit };
+    if (entryId) msg.entry_id = entryId;
+    if (query) msg.query = query;
+    if (scope && scope !== "all") msg.scope = scope;
+    if (statusSeverity && statusSeverity !== "all") msg.status_severity = statusSeverity;
+    return hass.callWS(msg);
+  }
+
+  async getDbStats(hass, { entryId, leagueId } = {}) {
+    const msg = { type: "kickbase/get_db_stats" };
+    if (entryId) msg.entry_id = entryId;
+    if (leagueId) msg.league_id = leagueId;
+    return hass.callWS(msg);
   }
 }
 
@@ -702,6 +731,7 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
         type: "kickbase/get_player_detail",
         league_id: params.leagueId,
         player_id: params.playerId,
+        ...(params.forceRefresh ? { force_refresh: true } : {}),
       });
       const p = data.player || {};
       const mv = data.market_value || {};
@@ -709,21 +739,30 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
       const latestSeason = perfSeasons[perfSeasons.length - 1] || {};
       const ph = (latestSeason.ph || []).slice(-10);
       const history = (data.transfer_history || []).slice(0, 8);
+      const statusHistory = (data.status_history || []).slice(0, 20);
+      const pImg = playerImg(p);
+      const tImg = teamImg(p);
 
       modal.innerHTML = `
         <div class="kb-modal-head">
           <div class="kb-row-left">
-            ${p.image ? `<img class="kb-avatar" style="width:56px;height:56px" src="${escapeHtml(p.image)}"/>` : ""}
+            ${pImg ? `<img class="kb-avatar" style="width:56px;height:56px" src="${escapeHtml(pImg)}"/>` : ""}
+            ${tImg ? `<img class="kb-crest" style="width:28px;height:28px" src="${escapeHtml(tImg)}"/>` : ""}
             <div>
               <div class="kb-title" style="font-size:20px">${escapeHtml(p.full_name || p.name)}</div>
               <div class="kb-subtitle">
                 ${escapeHtml(p.team_name || "")} · ${escapeHtml(p.position?.name_de || "")} ·
                 <span class="kb-pill ${escapeHtml(p.status?.severity || "ok")}">${escapeHtml(p.status?.label_de || "Fit")}</span>
+                <span class="kb-pill ${data.from_local_db ? "ok" : "accent"}" style="margin-left:4px">${data.from_local_db ? "💾 Lokal gespeichert" : "🌐 Live API"}</span>
               </div>
+              ${p.owner_name ? `<div class="kb-subtitle" style="margin-top:2px">Besitzer: ${escapeHtml(p.owner_name)}${p.is_on_market ? ` · Auf Transfermarkt (${formatCompactEur(p.price || p.market_value)})` : ""}</div>` : ""}
               ${p.status_text ? `<div class="kb-subtitle kb-warn-txt" style="margin-top:4px">${escapeHtml(p.status_text)}</div>` : ""}
             </div>
           </div>
-          <button class="kb-btn" data-close>Schließen</button>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <button class="kb-btn" data-live-reload title="Einzeln live von Kickbase nachladen">↻ Live</button>
+            <button class="kb-btn" data-close>Schließen</button>
+          </div>
         </div>
 
         <div class="kb-kpi-grid">
@@ -750,9 +789,37 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
         </div>
 
         <div class="kb-chart-box">
-          <div class="kb-kpi-label" style="margin-bottom:6px">Marktwert-Verlauf</div>
+          <div class="kb-kpi-label" style="margin-bottom:6px">Lokaler Marktwert-Verlauf (${(mv.series || []).length} Tage)</div>
           ${renderMarketValueChartSvg(mv.series)}
         </div>
+
+        ${
+          statusHistory.length
+            ? `
+          <div class="kb-chart-box">
+            <div class="kb-kpi-label" style="margin-bottom:8px">Lokale Status- & Besitzer-Historie (${statusHistory.length})</div>
+            <div class="kb-list">
+              ${statusHistory
+                .map(
+                  (st) => `
+                  <div class="kb-row">
+                    <div class="kb-row-left">
+                      <span class="kb-pill ${escapeHtml(st.status_severity || "ok")}">${escapeHtml(st.status_label_de || "Fit")}</span>
+                      <div class="kb-row-main">
+                        <div class="kb-row-name">${escapeHtml(st.status_text || st.owner_name || "Status erfasst")}</div>
+                        <div class="kb-row-meta">${formatDateTime(st.recorded_at)} · Besitzer: ${escapeHtml(st.owner_name || "Kickbase")}${st.is_on_market ? ` · 🛒 Auf Markt (${formatCompactEur(st.market_price)})` : ""}</div>
+                      </div>
+                    </div>
+                    <div class="kb-row-val">${formatCompactEur(st.market_value)}</div>
+                  </div>
+                `
+                )
+                .join("")}
+            </div>
+          </div>
+        `
+            : ""
+        }
 
         ${
           ph.length
@@ -811,14 +878,18 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
       const d = data.dashboard || {};
       const squad = data.squad || [];
       const transfers = (data.transfers || []).slice(0, 10);
+      const mgrAvatar = avatarImg(d);
 
       modal.innerHTML = `
         <div class="kb-modal-head">
           <div class="kb-row-left">
-            ${d.avatar ? `<img class="kb-avatar round" style="width:52px;height:52px" src="${escapeHtml(d.avatar)}"/>` : ""}
+            ${mgrAvatar ? `<img class="kb-avatar round" style="width:52px;height:52px" src="${escapeHtml(mgrAvatar)}"/>` : ""}
             <div>
               <div class="kb-title" style="font-size:20px">${escapeHtml(d.name)}</div>
-              <div class="kb-subtitle">Platz #${d.rank ?? "–"} · ${d.matchday_wins ?? 0} Spieltagssiege</div>
+              <div class="kb-subtitle">
+                Platz #${d.rank ?? "–"} · ${d.matchday_wins ?? 0} Spieltagssiege ·
+                <span class="kb-pill ${data.from_local_db ? "ok" : "accent"}">${data.from_local_db ? "💾 Lokal gespeichert" : "🌐 Live API"}</span>
+              </div>
             </div>
           </div>
           <button class="kb-btn" data-close>Schließen</button>
@@ -831,17 +902,17 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
           <div class="kb-kpi"><div class="kb-kpi-label">Kadergröße</div><div class="kb-kpi-val">${squad.length}</div></div>
         </div>
 
-        <div class="kb-kpi-label" style="margin-bottom:8px">Kader (${squad.length} Spieler)</div>
+        <div class="kb-kpi-label" style="margin-bottom:8px">Kader (${squad.length} Spieler · Klick für lokalen Verlauf)</div>
         <div class="kb-list" style="margin-bottom:14px">
           ${squad
             .map(
               (p) => `
-              <div class="kb-row">
+              <div class="kb-row clickable" data-modal-player-id="${escapeHtml(p.id)}">
                 <div class="kb-row-left">
-                  ${p.image ? `<img class="kb-avatar" src="${escapeHtml(p.image)}"/>` : ""}
+                  ${playerImg(p) ? `<img class="kb-avatar" src="${escapeHtml(playerImg(p))}"/>` : ""}
                   <div class="kb-row-main">
                     <div class="kb-row-name">${escapeHtml(p.name)}</div>
-                    <div class="kb-row-meta"><span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span> · Ø ${p.average_points ?? 0}</div>
+                    <div class="kb-row-meta"><span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span> · ${escapeHtml(p.status?.label_de || "Fit")} · Ø ${p.average_points ?? 0}</div>
                   </div>
                 </div>
                 <div class="kb-row-right">
@@ -964,4 +1035,17 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
   }
 
   modal.querySelector("[data-close]")?.addEventListener("click", () => backdrop.remove());
+  modal.querySelector("[data-live-reload]")?.addEventListener("click", () => {
+    backdrop.remove();
+    openKickbaseModal(shadowRoot, hass, "player", { ...params, forceRefresh: true });
+  });
+  modal.querySelectorAll("[data-modal-player-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      backdrop.remove();
+      openKickbaseModal(shadowRoot, hass, "player", {
+        leagueId: params.leagueId,
+        playerId: el.dataset.modalPlayerId,
+      });
+    });
+  });
 }

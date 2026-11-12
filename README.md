@@ -1,31 +1,31 @@
-# Kickbase für Home Assistant (Modulare Integration + Lovelace Cards + Sidebar-Panel)
+# Kickbase für Home Assistant (Modulare Integration + Lokale Datenbank + Lovelace Cards)
 
 Eine **vollständig modulare, rein lesende** Home-Assistant-Integration (HACS-kompatibel) auf Basis der inoffiziellen [Kickbase API v4 Dokumentation](https://github.com/kevinskyba/kickbase-api-doc).
 
 Sie kombiniert:
-1. **Native Home-Assistant-Entitäten** (Sensoren, Binary Sensors, Kalender, Bilder & Bus-Events für Automationen),
-2. **8 eigenständige, modulare Lovelace Cards** (mit visuellem UI-Editor, klickbaren Spieler-/Manager-/Match-/News-Modals und SVG-Marktwert-Charts),
-3. **Ein integriertes Kickbase Sidebar-Panel („Command Center“)** mit Multi-Liga-Umschalter, Spielersuche, Tabs und anpassbarer Karten-Sichtbarkeit.
+1. **Stündlichen Komplett-Sync (`3600 s`) + Lokale SQLite-Datenbank & Foto-Cache:** Fragt einmal pro Stunde gebündelt alle Spieler auf dem **Transfermarkt**, im **eigenen Kader** sowie in **allen anderen Manager-Kadern** der Liga ab, speichert Marktwert-Verläufe, Status-Historien, Manager-Snapshots und lädt Spielerfotos/Vereinswappen **nur einmalig** lokal in `<config>/kickbase_data/` herunter. Klicks in der UI lesen direkt aus SQLite (**0 Kickbase-API-Requests**).
+2. **Native Home-Assistant-Entitäten** (Sensoren inkl. DB-Metriken, Binary Sensors, Kalender, Bilder, Query-Services & Bus-Events),
+3. **8 eigenständige, modulare Lovelace Cards** (mit visuellem UI-Editor, klickbaren Spieler-/Manager-/Match-/News-Modals, Marktwert-Chart und Status-Historie),
+4. **Ein integriertes Kickbase Sidebar-Panel („Command Center“)** inkl. Multi-Liga-Umschalter, lokalem **Datenbank-Explorer**, Sofortsuche und anpassbarer Karten-Sichtbarkeit.
 
-> **Hinweis zur Sicherheit (Read-Only):** Diese Integration arbeitet **strikt lesend**. Es werden ausschließlich `GET`-Datenabfragen sowie der Login (`POST /v4/user/login` / Token-Refresh) ausgeführt. Es werden niemals Gebote abgegeben, Spieler verkauft, Aufstellungen verändert oder Boni eingesammelt.
+> **Hinweis zur Sicherheit (Read-Only):** Diese Integration arbeitet **strikt lesend**. Es werden ausschließlich `GET`-Datenabfragen (sowie Login/Token-Refresh) ausgeführt. Es werden niemals Gebote abgegeben, Spieler verkauft, Aufstellungen verändert oder Boni eingesammelt.
 
 ---
 
-## Modulare Architektur
+## Gebündelter Sync & Lokale SQLite-Datenbank
 
-Im Einrichtungs-Assistenten und jederzeit nachträglich über **Konfigurieren (Options Flow)** lassen sich alle 7 Daten-Module unabhängig aktivieren/deaktivieren und im Abrufintervall anpassen:
+Um API-Anfragen an Kickbase auf ein Minimum zu reduzieren, bündelt der `LeagueSyncCoordinator` den Liga-Abruf standardmäßig auf **1× pro Stunde (`3600 s`)**:
 
-| Modul-Key | Inhalt & Genutzte Kickbase-v4-Endpunkte | Standard-Intervall |
-| --- | --- | --- |
-| `league_overview` | Liga-Übersicht, Budget & Max-Gebot (`pbas`), Tabelle, Battles, Einstellungen (`/leagues/{id}/overview`, `/me`, `/me/budget`, `/ranking`, `/settings`) | 300 s |
-| `squad_lineup` | Kader, Startelf, Formation, Lock-Countdown, Vereinslogos (`/leagues/{id}/squad`, `/lineup/overview`, `/lineup/teams`, `/teamcenter/myeleven`) | 300 s |
-| `market_transfers` | Transfermarkt, Ablaufzeiten, Scout-Liste (`/leagues/{id}/market`, `/scoutedplayers`) + On-Demand Spielerdetails, 92T-Marktwert-Chart, Transfer-Historie | 180 s |
-| `live_matchday` | Spieltage, Live-Spiele, Live-Punkte, Bundesliga-Tabelle, Team-Ranking, Match-Details & Eventtypen (`/competitions/{id}/matchdays`, `/table`, `/ranking`, `/matches/{id}/details`, `/live/eventtypes`) | 900 s *(automatisch **60 s** bei Live-Spielen)* |
-| `feed_achievements` | Liga-Aktivitäten-Feed, Kommentare, Erfolge, Rivalen-Profile (`/leagues/{id}/activitiesFeed`, `/user/achievements`, `/managers/{id}/*`) | 300 s |
-| `news_predictions` | Stage, Bundesliga-News, Detail-Artikel, Voraussichtliche Aufstellungen (`/base/overview`, `/stage`, `/news/{id}`, `/predictions/teams/{id}`, `/items/{id}`) | 1800 s |
-| `challenges` | Challenge-Lobby, Division Ladder, Skill Points, Livepitch & Tabellen (`/challenges/lobby/*`, `/challenges/{id}/*`) | 900 s |
+1. **Gebündelte Erfassung:** Liga-Übersicht, Budget & Tabelle, eigener Kader/Aufstellung, Transfermarkt + Scout-Liste sowie alle gegnerischen Manager-Kader in der Liga.
+2. **Lokale SQLite-Datenbank (`<config>/kickbase_data/kickbase.db`):**
+   - `players`: Alle eindeutigen Spieler (eigener Kader, Transfermarkt, Kader anderer Manager) inkl. aktuellem Status, Marktwert, Punkten & Besitzer.
+   - `player_market_value_history`: Langfristige lokale Marktwert-Verläufe pro Tag (Backfill über `marketvalue/{timeframe}` alle ≥12 h + stündliche Fortschreibung).
+   - `player_status_history`: Deduplizierte Historie über alle Status-, Verletzungs-, Besitzer- und Transfermarkt-Wechsel (inkl. `kickbase_player_status_changed`-Event).
+   - `manager_snapshots` & `sync_runs`: Rivalen-Kader/Transfers und Audit-Logs über API-Requests & Foto-Downloads.
+3. **Lokaler Foto-Cache (`<config>/kickbase_data/photos/` → `/api/kickbase_photos/`):**
+   - Spielerfotos, Vereinswappen und Manager-Avatare werden lokal gespeichert; bereits vorhandene Dateien werden beim nächsten Sync **nicht erneut heruntergeladen**.
 
-Zusätzlich stehen im **Sidebar-Panel** und in den **Karten** On-Demand-Detailabfragen über eine interne WebSocket-API (mit TTL-Cache) bereit, damit die Home-Assistant-Datenbank (Recorder) nicht durch riesige Verlaufs-Attribute aufgebläht wird.
+Über **Konfigurieren (Options Flow)** lassen sich weiterhin alle 7 Daten-Module gezielt ein-/ausschalten sowie Foto-Caching, Detail-/Verlaufs-Backup, optionales adaptives Live-Polling (60 s während laufender Spiele, standardmäßig deaktiviert) und das Sync-Intervall (`300–86400 s`) anpassen.
 
 ---
 
@@ -33,7 +33,7 @@ Zusätzlich stehen im **Sidebar-Panel** und in den **Karten** On-Demand-Detailab
 
 ### Option 1: HACS (Custom Repository)
 1. Öffne **HACS → Integrationen → Drei-Punkte-Menü → Benutzerdefinierte Repositories**.
-2. Füge die URL deines Repositories als Kategorie **Integration** hinzu.
+2. Füge die URL `https://github.com/<user>/<repo>` als Kategorie **Integration** hinzu (im Repo müssen `hacs.json` und `custom_components/kickbase/` im Root liegen).
 3. Installiere **Kickbase** und starte Home Assistant neu.
 4. Gehe zu **Einstellungen → Geräte & Dienste → Integration hinzufügen → Kickbase**.
 
@@ -44,41 +44,44 @@ Zusätzlich stehen im **Sidebar-Panel** und in den **Karten** On-Demand-Detailab
 
 ---
 
-## Modulare Lovelace Cards
+## Modulare Lovelace Cards & Command Center
 
-Die Integration registriert automatisch `/api/kickbase_static/kickbase-cards.js` im Frontend – es ist keine manuelle Resource-Konfiguration nötig. Im Dashboard-Editor findest du folgende Karten direkt im Picker (inkl. visuellem Konfigurations-Editor):
+Die Integration registriert automatisch `/api/kickbase_static/kickbase-cards.js` im Frontend – es ist keine manuelle Resource-Konfiguration nötig. Im Dashboard-Editor stehen folgende Karten inkl. visuellem Editor bereit:
 
-- `custom:kickbase-overview-card` – Budget, Max-Gebot, Teamwert, Platzierung, Deadline & Status-Pills
+- `custom:kickbase-overview-card` – Budget, Max-Gebot, Teamwert, Platzierung, Deadline & DB-Status-Pill
 - `custom:kickbase-lineup-card` – Interaktives Spielfeld mit Formation, Status-Indikatoren, Kapitän & Spieler-Modal
 - `custom:kickbase-squad-card` – Sortier- & filterbarer Kader mit 24h-Marktwert-Trend, G&V und Ø-Punkten
 - `custom:kickbase-market-card` – Transfermarkt-Listings + Scout-Watchlist mit Ablauf-Timer
-- `custom:kickbase-standings-card` – Liga-Tabelle & Battles (Klick auf Manager öffnet Rivalen-Kader & Transfers)
+- `custom:kickbase-standings-card` – Liga-Tabelle & Battles (Klick auf Manager öffnet lokal gespeicherten Rivalen-Kader)
 - `custom:kickbase-live-card` – Live-Spiele, Live-Events-Modal, Spieltags-Ranking & Bundesliga-Tabelle
 - `custom:kickbase-feed-news-card` – Liga-Feed, Erfolge, Bundesliga-News & Voraussichtliche Aufstellungen
 - `custom:kickbase-challenges-card` – Division, Skill Points & aktive Matchday-Challenges
 
-Ein fertiges Beispiel-Dashboard findest du unter [`examples/lovelace-dashboard.yaml`](examples/lovelace-dashboard.yaml).
+Im Sidebar-Panel **Kickbase Command Center** gibt es zusätzlich den Tab **💾 Lokale Datenbank** mit Filtern nach Bereich (`Mein Kader`, `Transfermarkt`, `Andere Manager`, `Scout-Liste`), Fitness-Status (`⚠ Probleme`, `Fit`) sowie Klick-Inspektion aller lokalen Marktwert- und Status-Historien.
 
 ---
 
 ## Entitäten, Events & Services
 
 ### Sensoren & Binary Sensors (pro Liga + Global)
-- **Sensoren:** Budget, Max. Gebot, Teamwert, Tabellenplatz, Gesamtpunkte, Spieltagspunkte, Kadergröße, Marktwert-Trend 24h, Aufstellung Formation, Aufstellungs-Deadline, Transfermarkt-Spieler, Scout-Liste, Nächstes Marktwert-Update, Aktueller Spieltag, Live-Punkte, Letzte Liga-Aktivität, Erfolge, Letzte News, Challenge Division, Skill Points *(plus optional einzelne Spieler-Sensoren pro Kader-Spieler)*.
+- **Lokale DB & Sync Sensoren:** `Lokale DB Spieler` (mit Attributen `my_squad_count`, `market_count`, `rival_players_count`, `market_value_points`, `status_events_count`, `photos_cached`, `db_size_kb`, `last_api_requests`), `Letzter Kickbase-Sync`.
+- **Modul-Sensoren:** Budget, Max. Gebot, Teamwert, Tabellenplatz, Gesamtpunkte, Spieltagspunkte, Kadergröße, Marktwert-Trend 24h, Aufstellung Formation, Aufstellungs-Deadline, Transfermarkt-Spieler, Scout-Liste, Nächstes Marktwert-Update, Aktueller Spieltag, Live-Punkte, Letzte Liga-Aktivität, Erfolge, Letzte News, Challenge Division, Skill Points *(plus optional einzelne Spieler-Sensoren mit lokalem `entity_picture`)*.
 - **Binary Sensors:** `Budget im Minus`, `Aufstellung unvollständig/Problem`, `Kader-Marktwert steigt`, `Scout-Spieler auf Transfermarkt`, `Spieltag Live`.
-- **Kalender (`calendar`):** Spielplan & Aufstellungs-Deadlines für Home Assistant Kalender & Erinnerungen.
+- **Kalender (`calendar`):** Spielplan & Aufstellungs-Deadlines.
 - **Bilder (`image`):** Manager-Profilbild & Liga-Logos.
 
 ### Home Assistant Bus Events
+- `kickbase_player_status_changed` – Spieler ändert Fitness-Status, Besitzer oder Transfermarkt-Status
 - `kickbase_negative_budget` – Budget fällt unter 0 €
 - `kickbase_scouted_on_market` – Beobachteter Spieler erscheint auf dem Transfermarkt
 - `kickbase_new_activity` – Neuer Eintrag im Liga-Feed
 - `kickbase_live_player_event` – Neues Live-Ereignis (Tor/Karte/etc.) eines eigenen Spielers
 
-Beispiel-Automationen findest du unter [`examples/automations.yaml`](examples/automations.yaml).
-
-### Service
-- `kickbase.refresh_data` – Aktualisiert wahlweise eine bestimmte `league_id` und/oder ein einzelnes `module` sofort auf Abruf.
+### Services
+- `kickbase.refresh_data` – Aktualisiert ausgewählte Liga oder globale Module sofort auf Abruf.
+- `kickbase.sync_database` – Führt den gebündelten Komplett-Sync sofort aus (optional `force_details: true`).
+- `kickbase.get_player_history` – Liefert Marktwert-Verlauf & Status-Historie eines Spielers direkt aus SQLite zurück (**0 API-Anfragen**).
+- `kickbase.query_local_players` – Filtert lokal gespeicherte Spieler nach Name, Bereich oder Status (**0 API-Anfragen**).
 
 ---
 

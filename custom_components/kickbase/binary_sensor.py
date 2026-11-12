@@ -94,49 +94,55 @@ async def async_setup_entry(
     entities: list[BinarySensorEntity] = []
 
     for lid, lset in runtime.leagues.items():
+        if lset.sync is None:
+            continue
         league_device = build_league_device_info(
             lid,
             lset.league_name,
             (account_data.get("leagues") or {}).get(lid, {}).get("competition_name"),
         )
-        if lset.overview is not None and runtime.is_module_enabled(MODULE_LEAGUE_OVERVIEW):
+        if runtime.is_module_enabled(MODULE_LEAGUE_OVERVIEW):
             for desc in OVERVIEW_BINARY_SENSORS:
                 entities.append(
                     KickbaseBinarySensor(
-                        coordinator=lset.overview,
+                        coordinator=lset.sync,
                         description=desc,
                         unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
                         device_info=league_device,
+                        module_key=MODULE_LEAGUE_OVERVIEW,
                     )
                 )
-        if lset.squad_lineup is not None and runtime.is_module_enabled(MODULE_SQUAD_LINEUP):
+        if runtime.is_module_enabled(MODULE_SQUAD_LINEUP):
             for desc in SQUAD_BINARY_SENSORS:
                 entities.append(
                     KickbaseBinarySensor(
-                        coordinator=lset.squad_lineup,
+                        coordinator=lset.sync,
                         description=desc,
                         unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
                         device_info=league_device,
+                        module_key=MODULE_SQUAD_LINEUP,
                     )
                 )
-        if lset.market_transfers is not None and runtime.is_module_enabled(MODULE_MARKET_TRANSFERS):
+        if runtime.is_module_enabled(MODULE_MARKET_TRANSFERS):
             for desc in MARKET_BINARY_SENSORS:
                 entities.append(
                     KickbaseBinarySensor(
-                        coordinator=lset.market_transfers,
+                        coordinator=lset.sync,
                         description=desc,
                         unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
                         device_info=league_device,
+                        module_key=MODULE_MARKET_TRANSFERS,
                     )
                 )
-        if lset.live_matchday is not None and runtime.is_module_enabled(MODULE_LIVE_MATCHDAY):
+        if runtime.is_module_enabled(MODULE_LIVE_MATCHDAY):
             for desc in LIVE_BINARY_SENSORS:
                 entities.append(
                     KickbaseBinarySensor(
-                        coordinator=lset.live_matchday,
+                        coordinator=lset.sync,
                         description=desc,
                         unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
                         device_info=league_device,
+                        module_key=MODULE_LIVE_MATCHDAY,
                     )
                 )
 
@@ -156,15 +162,21 @@ class KickbaseBinarySensor(CoordinatorEntity, BinarySensorEntity):
         description: KickbaseBinarySensorDescription,
         unique_id: str,
         device_info: Any,
+        module_key: str | None = None,
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = unique_id
         self._attr_device_info = device_info
+        self._module_key = module_key
 
     @property
     def is_on(self) -> bool | None:
         data = self.coordinator.data
         if not isinstance(data, dict):
             return None
+        if self._module_key is not None:
+            data = data.get(self._module_key)
+            if not isinstance(data, dict):
+                return None
         return self.entity_description.is_on_fn(data)

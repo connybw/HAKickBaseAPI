@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api.models import parse_iso_datetime
+from .const import MODULE_LIVE_MATCHDAY, MODULE_SQUAD_LINEUP
 from .entity import build_league_device_info
 
 if TYPE_CHECKING:
@@ -28,8 +29,15 @@ async def async_setup_entry(
     account_data = runtime.account.data or {}
     entities: list[CalendarEntity] = []
 
+    if not (
+        runtime.is_module_enabled(MODULE_LIVE_MATCHDAY)
+        or runtime.is_module_enabled(MODULE_SQUAD_LINEUP)
+    ):
+        async_add_entities(entities)
+        return
+
     for lid, lset in runtime.leagues.items():
-        if lset.live_matchday is None and lset.squad_lineup is None:
+        if lset.sync is None:
             continue
         league_device = build_league_device_info(
             lid,
@@ -61,18 +69,19 @@ class KickbaseLeagueCalendar(CoordinatorEntity, CalendarEntity):
         league_set: LeagueCoordinatorSet,
         device_info: Any,
     ) -> None:
-        primary_coord = league_set.live_matchday or league_set.squad_lineup
-        super().__init__(primary_coord)
+        super().__init__(league_set.sync)
         self._lset = league_set
         self._attr_unique_id = f"{entry_id}_{league_set.league_id}_calendar"
         self._attr_device_info = device_info
 
     def _build_events(self) -> list[CalendarEvent]:
         events: list[CalendarEvent] = []
+        sync_data = self.coordinator.data if isinstance(self.coordinator.data, dict) else {}
 
         # 1. Lineup lock deadline
-        if self._lset.squad_lineup and isinstance(self._lset.squad_lineup.data, dict):
-            lineup = self._lset.squad_lineup.data.get("lineup") or {}
+        squad_data = sync_data.get(MODULE_SQUAD_LINEUP)
+        if isinstance(squad_data, dict):
+            lineup = squad_data.get("lineup") or {}
             lock_dt = parse_iso_datetime(lineup.get("lock_at"))
             if lock_dt is not None:
                 md = lineup.get("matchday") or "?"
@@ -89,8 +98,9 @@ class KickbaseLeagueCalendar(CoordinatorEntity, CalendarEntity):
                 )
 
         # 2. Matchday fixtures
-        if self._lset.live_matchday and isinstance(self._lset.live_matchday.data, dict):
-            for md_block in self._lset.live_matchday.data.get("all_matchdays") or []:
+        live_data = sync_data.get(MODULE_LIVE_MATCHDAY)
+        if isinstance(live_data, dict):
+            for md_block in live_data.get("all_matchdays") or []:
                 day_num = md_block.get("day")
                 for match in md_block.get("matches") or []:
                     start_dt = parse_iso_datetime(match.get("date"))

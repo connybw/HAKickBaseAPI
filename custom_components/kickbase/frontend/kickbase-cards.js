@@ -5,6 +5,7 @@
 
 import {
   KICKBASE_CSS,
+  avatarImg,
   escapeHtml,
   formatCompactEur,
   formatDateTime,
@@ -13,8 +14,10 @@ import {
   formatSignedCompactEur,
   kickbaseStore,
   openKickbaseModal,
+  playerImg,
   positionClass,
   renderPitchHtml,
+  teamImg,
 } from "./kickbase-shared.js?v=1.0.0";
 
 /* -------------------------------------------------------------------------- */
@@ -316,6 +319,11 @@ class KickbaseOverviewCard extends KickbaseBaseCard {
           <span class="kb-pill">Scouts auf Markt: ${mk.scouted_on_market_count ?? 0}</span>
           <span class="kb-pill">Kader: ${summary.count ?? 0} Spieler</span>
           ${
+            this._snapshot?.db_stats
+              ? `<span class="kb-pill">💾 DB: ${this._snapshot.db_stats.players_count ?? 0} Spieler · ${this._snapshot.db_stats.photos_cached ?? 0} Fotos</span>`
+              : ""
+          }
+          ${
             lineup.issue_count > 0
               ? `<span class="kb-pill warn">⚠ ${lineup.issue_count} Problem(e) in Startelf</span>`
               : `<span class="kb-pill ok">Startelf einsatzbereit</span>`
@@ -426,8 +434,8 @@ class KickbaseSquadCard extends KickbaseBaseCard {
                   return `
                     <div class="kb-row clickable" data-player-id="${escapeHtml(p.id)}">
                       <div class="kb-row-left">
-                        ${p.image ? `<img class="kb-avatar" src="${escapeHtml(p.image)}" loading="lazy"/>` : ""}
-                        ${p.team_image ? `<img class="kb-crest" src="${escapeHtml(p.team_image)}" loading="lazy"/>` : ""}
+                        ${playerImg(p) ? `<img class="kb-avatar" src="${escapeHtml(playerImg(p))}" loading="lazy"/>` : ""}
+                        ${teamImg(p) ? `<img class="kb-crest" src="${escapeHtml(teamImg(p))}" loading="lazy"/>` : ""}
                         <div class="kb-row-main">
                           <div class="kb-row-name">${p.in_starting_eleven ? "⭐ " : ""}${escapeHtml(p.name)}</div>
                           <div class="kb-row-meta">
@@ -521,7 +529,8 @@ class KickbaseMarketCard extends KickbaseBaseCard {
                   return `
                     <div class="kb-row clickable ${p.is_scouted ? "highlight" : ""}" data-player-id="${escapeHtml(p.id)}">
                       <div class="kb-row-left">
-                        ${p.image ? `<img class="kb-avatar" src="${escapeHtml(p.image)}" loading="lazy"/>` : ""}
+                        ${playerImg(p) ? `<img class="kb-avatar" src="${escapeHtml(playerImg(p))}" loading="lazy"/>` : ""}
+                        ${teamImg(p) ? `<img class="kb-crest" src="${escapeHtml(teamImg(p))}" loading="lazy"/>` : ""}
                         <div class="kb-row-main">
                           <div class="kb-row-name">${p.is_scouted ? "🔭 " : ""}${escapeHtml(p.full_name || p.name)}</div>
                           <div class="kb-row-meta">
@@ -624,7 +633,7 @@ class KickbaseStandingsCard extends KickbaseBaseCard {
                   <div class="kb-row clickable ${m.is_me ? "highlight" : ""}" data-manager-id="${escapeHtml(m.id)}">
                     <div class="kb-row-left">
                       <span class="kb-pill" style="min-width:34px;justify-content:center">#${m.rank || "–"}</span>
-                      ${m.avatar ? `<img class="kb-avatar round" src="${escapeHtml(m.avatar)}" loading="lazy"/>` : ""}
+                      ${avatarImg(m) ? `<img class="kb-avatar round" src="${escapeHtml(avatarImg(m))}" loading="lazy"/>` : ""}
                       <div class="kb-row-main">
                         <div class="kb-row-name">${escapeHtml(m.name)} ${m.is_admin ? "🛡" : ""}</div>
                         <div class="kb-row-meta">Teamwert ${formatCompactEur(m.team_value)} · ST #${m.matchday_rank || "–"} (${m.matchday_points ?? 0} Pkt)</div>

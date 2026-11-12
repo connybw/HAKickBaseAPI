@@ -16,6 +16,7 @@ PANEL_URL_PATH: Final = "kickbase"
 PANEL_TITLE: Final = "Kickbase"
 PANEL_ICON: Final = "mdi:soccer"
 STATIC_URL_PATH: Final = "/api/kickbase_static"
+STATIC_PHOTOS_URL_PATH: Final = "/api/kickbase_photos"
 
 # Config & Options keys
 CONF_EMAIL: Final = "email"
@@ -28,6 +29,10 @@ CONF_ENABLE_SIDEBAR_PANEL: Final = "enable_sidebar_panel"
 CONF_MARKET_VALUE_TIMEFRAME: Final = "market_value_timeframe"
 CONF_SCAN_INTERVALS: Final = "scan_intervals"
 CONF_DEFAULT_COMPETITION_ID: Final = "default_competition_id"
+CONF_SYNC_INTERVAL: Final = "sync_interval"
+CONF_CACHE_PHOTOS: Final = "cache_photos"
+CONF_FETCH_PLAYER_DETAILS: Final = "fetch_player_details"
+CONF_ADAPTIVE_LIVE_POLLING: Final = "adaptive_live_polling"
 
 # Modular Data Modules
 MODULE_LEAGUE_OVERVIEW: Final = "league_overview"
@@ -50,20 +55,23 @@ ALL_MODULES: Final[tuple[str, ...]] = (
 
 DEFAULT_ENABLED_MODULES: Final[list[str]] = list(ALL_MODULES)
 
-# Default polling intervals (in seconds) per module — designed to be respectful of API rate limits
+# Default polling intervals (in seconds) — 3600s (1 hour) consolidated sync to minimize API calls
 DEFAULT_INTERVALS: Final[dict[str, int]] = {
     "account": 3600,
-    MODULE_LEAGUE_OVERVIEW: 300,
-    MODULE_SQUAD_LINEUP: 300,
-    MODULE_MARKET_TRANSFERS: 180,
-    MODULE_LIVE_MATCHDAY: 900,  # Drops to LIVE_MATCHDAY_ACTIVE_INTERVAL when matches are live
-    MODULE_FEED_ACHIEVEMENTS: 300,
-    MODULE_NEWS_PREDICTIONS: 1800,
-    MODULE_CHALLENGES: 900,
+    "league_sync": 3600,
+    MODULE_LEAGUE_OVERVIEW: 3600,
+    MODULE_SQUAD_LINEUP: 3600,
+    MODULE_MARKET_TRANSFERS: 3600,
+    MODULE_LIVE_MATCHDAY: 3600,
+    MODULE_FEED_ACHIEVEMENTS: 3600,
+    MODULE_NEWS_PREDICTIONS: 3600,
+    MODULE_CHALLENGES: 3600,
 }
 
+DEFAULT_SYNC_INTERVAL_SECONDS: Final = 3600
+DEFAULT_DETAILS_REFRESH_HOURS: Final = 12
 LIVE_MATCHDAY_ACTIVE_INTERVAL: Final = timedelta(seconds=60)
-MIN_POLL_INTERVAL_SECONDS: Final = 60
+MIN_POLL_INTERVAL_SECONDS: Final = 300
 MAX_POLL_INTERVAL_SECONDS: Final = 86400
 
 DEFAULT_MARKET_VALUE_TIMEFRAME: Final = 92
@@ -75,6 +83,7 @@ EVENT_NEW_ACTIVITY: Final = f"{EVENT_PREFIX}_new_activity"
 EVENT_SCOUTED_ON_MARKET: Final = f"{EVENT_PREFIX}_scouted_on_market"
 EVENT_NEGATIVE_BUDGET: Final = f"{EVENT_PREFIX}_negative_budget"
 EVENT_LIVE_PLAYER_EVENT: Final = f"{EVENT_PREFIX}_live_player_event"
+EVENT_PLAYER_STATUS_CHANGED: Final = f"{EVENT_PREFIX}_player_status_changed"
 
 # Kickbase Player Positions
 POSITIONS: Final[dict[int, dict[str, str]]] = {

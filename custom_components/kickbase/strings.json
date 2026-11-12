@@ -17,13 +17,17 @@
         }
       },
       "modules": {
-        "title": "Modulare Datenpakete & UI",
-        "description": "Aktiviere genau die Kickbase-Module, die du nutzen möchtest. Alle Module lassen sich jederzeit in den Optionen anpassen.",
+        "title": "Modulare Datenpakete, Sync & lokale Datenbank",
+        "description": "Alle Liga-Daten (Transfermarkt, eigener Kader & alle anderen Manager) werden gebündelt alle X Sekunden (Standard: 3600 s = 1 Stunde) abgerufen und lokal in SQLite + Foto-Cache gespeichert.",
         "data": {
           "primary_league": "Primäre Liga (Standard für Panel & Kalender)",
           "modules": "Aktive Daten-Module",
           "enable_sidebar_panel": "Kickbase Sidebar-Panel aktivieren",
           "enable_player_entities": "Einzelne Spieler-Sensoren für Kader anlegen",
+          "cache_photos": "Spielerfotos & Vereinswappen lokal cachen (keine doppelten Downloads)",
+          "fetch_player_details": "Spielerdetails, Status & Marktwert-Verläufe beim Sync lokal sichern",
+          "adaptive_live_polling": "Schnelleres Live-Polling (60 s) nur während laufender Bundesliga-Spiele",
+          "sync_interval": "Gebündeltes Sync-Intervall für alle Liga- & Spielerdaten (s)",
           "market_value_timeframe": "Marktwert-Verlauf Zeitraum"
         }
       },
@@ -50,20 +54,20 @@
   "options": {
     "step": {
       "init": {
-        "title": "Kickbase Module & Abrufintervalle",
-        "description": "Passe aktive Ligen, Module, Darstellung und Abrufintervalle (in Sekunden) individuell an.",
+        "title": "Kickbase Sync, Lokale Datenbank & Module",
+        "description": "Passe aktive Ligen, Module, lokale Foto-/Verlaufsspeicherung und das gebündelte Sync-Intervall (Standard: 3600 s = 1× pro Stunde) an.",
         "data": {
           "leagues": "Überwachte Ligen",
           "primary_league": "Primäre Liga",
           "modules": "Aktive Daten-Module",
           "enable_sidebar_panel": "Kickbase Sidebar-Panel aktivieren",
           "enable_player_entities": "Einzelne Spieler-Sensoren für Kader anlegen",
+          "cache_photos": "Spielerfotos & Vereinswappen lokal cachen",
+          "fetch_player_details": "Spielerdetails, Status & Marktwert-Verläufe lokal sichern",
+          "adaptive_live_polling": "Live-Spieltags-Polling (60 s während laufender Spiele)",
+          "sync_interval": "Liga-Komplett-Sync Intervall (Standard: 3600 s)",
           "market_value_timeframe": "Marktwert-Verlauf Zeitraum",
-          "interval_league_overview": "Intervall: Liga, Budget & Tabelle (s)",
-          "interval_squad_lineup": "Intervall: Kader & Aufstellung (s)",
-          "interval_market_transfers": "Intervall: Transfermarkt & Scouting (s)",
-          "interval_live_matchday": "Intervall: Spieltag & Bundesliga (Idle, s)",
-          "interval_feed_achievements": "Intervall: Aktivitäten & Erfolge (s)",
+          "interval_account": "Intervall: Konto & Ligen-Erkennung (s)",
           "interval_news_predictions": "Intervall: News & Aufstellungsprognosen (s)",
           "interval_challenges": "Intervall: Challenges & Lobby (s)"
         }

@@ -32,20 +32,25 @@ from homeassistant.helpers.selector import (
 from .api import KickbaseApi, KickbaseAuthError, KickbaseError
 from .const import (
     ALL_MODULES,
+    CONF_ADAPTIVE_LIVE_POLLING,
+    CONF_CACHE_PHOTOS,
     CONF_DEFAULT_COMPETITION_ID,
     CONF_EMAIL,
     CONF_ENABLE_PLAYER_ENTITIES,
     CONF_ENABLE_SIDEBAR_PANEL,
+    CONF_FETCH_PLAYER_DETAILS,
     CONF_LEAGUES,
     CONF_MARKET_VALUE_TIMEFRAME,
     CONF_MODULES,
     CONF_PASSWORD,
     CONF_PRIMARY_LEAGUE,
     CONF_SCAN_INTERVALS,
+    CONF_SYNC_INTERVAL,
     DEFAULT_COMPETITION_ID,
     DEFAULT_ENABLED_MODULES,
     DEFAULT_INTERVALS,
     DEFAULT_MARKET_VALUE_TIMEFRAME,
+    DEFAULT_SYNC_INTERVAL_SECONDS,
     DOMAIN,
     MAX_POLL_INTERVAL_SECONDS,
     MIN_POLL_INTERVAL_SECONDS,
@@ -222,17 +227,24 @@ class KickbaseConfigFlow(ConfigFlow, domain=DOMAIN):
         ]
 
         if user_input is not None:
+            sync_sec = int(user_input.get(CONF_SYNC_INTERVAL, DEFAULT_SYNC_INTERVAL_SECONDS))
+            intervals = dict(DEFAULT_INTERVALS)
+            intervals["league_sync"] = sync_sec
             options_payload = {
                 CONF_LEAGUES: self._selected_leagues,
                 CONF_PRIMARY_LEAGUE: user_input.get(CONF_PRIMARY_LEAGUE, default_primary),
                 CONF_MODULES: user_input.get(CONF_MODULES, DEFAULT_ENABLED_MODULES),
                 CONF_ENABLE_SIDEBAR_PANEL: user_input.get(CONF_ENABLE_SIDEBAR_PANEL, True),
                 CONF_ENABLE_PLAYER_ENTITIES: user_input.get(CONF_ENABLE_PLAYER_ENTITIES, False),
+                CONF_CACHE_PHOTOS: user_input.get(CONF_CACHE_PHOTOS, True),
+                CONF_FETCH_PLAYER_DETAILS: user_input.get(CONF_FETCH_PLAYER_DETAILS, True),
+                CONF_ADAPTIVE_LIVE_POLLING: user_input.get(CONF_ADAPTIVE_LIVE_POLLING, False),
+                CONF_SYNC_INTERVAL: sync_sec,
                 CONF_MARKET_VALUE_TIMEFRAME: int(
                     user_input.get(CONF_MARKET_VALUE_TIMEFRAME, DEFAULT_MARKET_VALUE_TIMEFRAME)
                 ),
                 CONF_DEFAULT_COMPETITION_ID: DEFAULT_COMPETITION_ID,
-                CONF_SCAN_INTERVALS: dict(DEFAULT_INTERVALS),
+                CONF_SCAN_INTERVALS: intervals,
             }
             return self.async_create_entry(
                 title=f"Kickbase ({self._user_name})",
@@ -264,6 +276,20 @@ class KickbaseConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         schema_dict[vol.Required(CONF_ENABLE_SIDEBAR_PANEL, default=True)] = BooleanSelector()
         schema_dict[vol.Required(CONF_ENABLE_PLAYER_ENTITIES, default=False)] = BooleanSelector()
+        schema_dict[vol.Required(CONF_CACHE_PHOTOS, default=True)] = BooleanSelector()
+        schema_dict[vol.Required(CONF_FETCH_PLAYER_DETAILS, default=True)] = BooleanSelector()
+        schema_dict[vol.Required(CONF_ADAPTIVE_LIVE_POLLING, default=False)] = BooleanSelector()
+        schema_dict[
+            vol.Required(CONF_SYNC_INTERVAL, default=DEFAULT_SYNC_INTERVAL_SECONDS)
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=MIN_POLL_INTERVAL_SECONDS,
+                max=MAX_POLL_INTERVAL_SECONDS,
+                step=60,
+                unit_of_measurement="s",
+                mode=NumberSelectorMode.BOX,
+            )
+        )
         schema_dict[
             vol.Required(
                 CONF_MARKET_VALUE_TIMEFRAME,
@@ -355,10 +381,17 @@ class KickbaseOptionsFlow(OptionsFlow):
 
         if user_input is not None:
             intervals = dict(opts.get(CONF_SCAN_INTERVALS) or DEFAULT_INTERVALS)
-            for mod in ALL_MODULES:
-                key = f"interval_{mod}"
-                if key in user_input:
-                    intervals[mod] = int(user_input[key])
+            sync_sec = int(
+                user_input.get(
+                    CONF_SYNC_INTERVAL,
+                    opts.get(CONF_SYNC_INTERVAL, DEFAULT_SYNC_INTERVAL_SECONDS),
+                )
+            )
+            intervals["league_sync"] = sync_sec
+            for key_name in ("account", MODULE_NEWS_PREDICTIONS, MODULE_CHALLENGES):
+                field_key = f"interval_{key_name}"
+                if field_key in user_input:
+                    intervals[key_name] = int(user_input[field_key])
 
             selected_leagues = user_input.get(CONF_LEAGUES, opts.get(CONF_LEAGUES, []))
             primary = user_input.get(CONF_PRIMARY_LEAGUE, opts.get(CONF_PRIMARY_LEAGUE, ""))
@@ -371,6 +404,16 @@ class KickbaseOptionsFlow(OptionsFlow):
                 CONF_MODULES: user_input.get(CONF_MODULES, DEFAULT_ENABLED_MODULES),
                 CONF_ENABLE_SIDEBAR_PANEL: user_input.get(CONF_ENABLE_SIDEBAR_PANEL, True),
                 CONF_ENABLE_PLAYER_ENTITIES: user_input.get(CONF_ENABLE_PLAYER_ENTITIES, False),
+                CONF_CACHE_PHOTOS: user_input.get(
+                    CONF_CACHE_PHOTOS, opts.get(CONF_CACHE_PHOTOS, True)
+                ),
+                CONF_FETCH_PLAYER_DETAILS: user_input.get(
+                    CONF_FETCH_PLAYER_DETAILS, opts.get(CONF_FETCH_PLAYER_DETAILS, True)
+                ),
+                CONF_ADAPTIVE_LIVE_POLLING: user_input.get(
+                    CONF_ADAPTIVE_LIVE_POLLING, opts.get(CONF_ADAPTIVE_LIVE_POLLING, False)
+                ),
+                CONF_SYNC_INTERVAL: sync_sec,
                 CONF_MARKET_VALUE_TIMEFRAME: int(
                     user_input.get(
                         CONF_MARKET_VALUE_TIMEFRAME, DEFAULT_MARKET_VALUE_TIMEFRAME
@@ -396,7 +439,7 @@ class KickbaseOptionsFlow(OptionsFlow):
             NumberSelectorConfig(
                 min=MIN_POLL_INTERVAL_SECONDS,
                 max=MAX_POLL_INTERVAL_SECONDS,
-                step=30,
+                step=60,
                 unit_of_measurement="s",
                 mode=NumberSelectorMode.BOX,
             )
@@ -451,6 +494,35 @@ class KickbaseOptionsFlow(OptionsFlow):
         ] = BooleanSelector()
         schema_dict[
             vol.Required(
+                CONF_CACHE_PHOTOS,
+                default=opts.get(CONF_CACHE_PHOTOS, True),
+            )
+        ] = BooleanSelector()
+        schema_dict[
+            vol.Required(
+                CONF_FETCH_PLAYER_DETAILS,
+                default=opts.get(CONF_FETCH_PLAYER_DETAILS, True),
+            )
+        ] = BooleanSelector()
+        schema_dict[
+            vol.Required(
+                CONF_ADAPTIVE_LIVE_POLLING,
+                default=opts.get(CONF_ADAPTIVE_LIVE_POLLING, False),
+            )
+        ] = BooleanSelector()
+        schema_dict[
+            vol.Required(
+                CONF_SYNC_INTERVAL,
+                default=int(
+                    opts.get(
+                        CONF_SYNC_INTERVAL,
+                        current_intervals.get("league_sync", DEFAULT_SYNC_INTERVAL_SECONDS),
+                    )
+                ),
+            )
+        ] = interval_selector
+        schema_dict[
+            vol.Required(
                 CONF_MARKET_VALUE_TIMEFRAME,
                 default=str(opts.get(CONF_MARKET_VALUE_TIMEFRAME, DEFAULT_MARKET_VALUE_TIMEFRAME)),
             )
@@ -466,11 +538,11 @@ class KickbaseOptionsFlow(OptionsFlow):
             )
         )
 
-        for mod in ALL_MODULES:
+        for key_name in ("account", MODULE_NEWS_PREDICTIONS, MODULE_CHALLENGES):
             schema_dict[
                 vol.Required(
-                    f"interval_{mod}",
-                    default=int(current_intervals.get(mod, DEFAULT_INTERVALS[mod])),
+                    f"interval_{key_name}",
+                    default=int(current_intervals.get(key_name, DEFAULT_INTERVALS[key_name])),
                 )
             ] = interval_selector
 

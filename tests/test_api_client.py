@@ -56,10 +56,24 @@ class TestKickbaseApiClient(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(res, {"lnm": "Testliga"})
         self.assertEqual(client.token, "tok_123")
+        self.assertEqual(client.request_count, 2)
         self.assertEqual(len(session.requests), 2)
         get_req = session.requests[1]
         self.assertEqual(get_req["headers"]["Authorization"], "Bearer tok_123")
         self.assertEqual(get_req["params"], {"includeManagersAndBattles": "true"})
+
+    async def test_download_bytes_read_only_and_rejects_non_http(self) -> None:
+        session = FakeClientSession()
+        session.add_route(
+            "GET",
+            "/p/4577.png",
+            FakeResponse(200, bytes_data=b"\x89PNGDATA", headers={"Content-Type": "image/png"}),
+        )
+        client = KickbaseApiClient(session, "u@e.de", "pw")
+        res = await client.async_download_bytes("https://kickbase.b-cdn.net/p/4577.png")
+        self.assertEqual(res, (b"\x89PNGDATA", "image/png"))
+        self.assertIsNone(await client.async_download_bytes("file:///etc/passwd"))
+        self.assertIsNone(await client.async_download_bytes("https://kickbase.b-cdn.net/missing.png"))
 
     async def test_login_missing_token_or_401_raises_auth_error(self) -> None:
         session = FakeClientSession()

@@ -1,4 +1,4 @@
-"""Sensor platform for Kickbase (modular per-module & per-league sensors)."""
+"""Sensor platform for Kickbase (modular per-module, per-league & local DB sensors)."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from .entity import (
 
 if TYPE_CHECKING:
     from . import KickbaseConfigEntry
-    from .coordinators import KickbaseRuntimeData, LeagueCoordinatorSet
+    from .coordinators import KickbaseRuntimeData
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -72,6 +72,49 @@ ACCOUNT_SENSORS: tuple[KickbaseSensorDescription, ...] = (
                 {"id": lid, "name": info.get("name"), "rank": info.get("rank")}
                 for lid, info in (d.get("leagues") or {}).items()
             ]
+        },
+    ),
+)
+
+LOCAL_DB_SENSORS: tuple[KickbaseSensorDescription, ...] = (
+    KickbaseSensorDescription(
+        key="db_players_count",
+        name="Lokale DB Spieler",
+        icon="mdi:database",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: (d.get("db_stats") or {}).get("players_count", 0),
+        attrs_fn=lambda d: {
+            "my_squad_count": (d.get("db_stats") or {}).get("my_squad_count", 0),
+            "market_count": (d.get("db_stats") or {}).get("market_count", 0),
+            "rival_players_count": (d.get("db_stats") or {}).get("rival_players_count", 0),
+            "market_value_points": (d.get("db_stats") or {}).get("market_value_points", 0),
+            "status_events_count": (d.get("db_stats") or {}).get("status_events_count", 0),
+            "managers_count": (d.get("db_stats") or {}).get("managers_count", 0),
+            "photos_cached": (d.get("db_stats") or {}).get("photos_cached", 0),
+            "db_size_kb": (d.get("db_stats") or {}).get("db_size_kb", 0),
+            "last_api_requests": d.get("last_api_requests", 0),
+            "last_sync_at": d.get("last_sync_at"),
+        },
+    ),
+    KickbaseSensorDescription(
+        key="last_sync_at",
+        name="Letzter Kickbase-Sync",
+        icon="mdi:database-sync",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda d: parse_iso_datetime(d.get("last_sync_at")),
+        attrs_fn=lambda d: {
+            "api_requests": ((d.get("db_stats") or {}).get("last_sync") or {}).get(
+                "api_requests", d.get("last_api_requests", 0)
+            ),
+            "photos_downloaded": ((d.get("db_stats") or {}).get("last_sync") or {}).get(
+                "photos_downloaded", 0
+            ),
+            "players_total": ((d.get("db_stats") or {}).get("last_sync") or {}).get(
+                "players_total", 0
+            ),
+            "status": ((d.get("db_stats") or {}).get("last_sync") or {}).get(
+                "status", "ok"
+            ),
         },
     ),
 )
@@ -384,43 +427,59 @@ async def async_setup_entry(
                 )
             )
 
-    # Per-league modular sensors
+    # Per-league modular sensors & local DB metrics backed by consolidated LeagueSyncCoordinator
     enable_player_entities = bool(entry.options.get(CONF_ENABLE_PLAYER_ENTITIES, False))
     for lid, lset in runtime.leagues.items():
+        if lset.sync is None:
+            continue
         league_device = build_league_device_info(
             lid,
             lset.league_name,
             (account_data.get("leagues") or {}).get(lid, {}).get("competition_name"),
         )
 
-        if lset.overview is not None and runtime.is_module_enabled(MODULE_LEAGUE_OVERVIEW):
+        # Always register local DB & sync diagnostics sensors per league
+        for desc in LOCAL_DB_SENSORS:
+            entities.append(
+                KickbaseCoordinatorSensor(
+                    coordinator=lset.sync,
+                    description=desc,
+                    unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
+                    device_info=league_device,
+                )
+            )
+
+        if runtime.is_module_enabled(MODULE_LEAGUE_OVERVIEW):
             for desc in LEAGUE_OVERVIEW_SENSORS:
                 entities.append(
                     KickbaseCoordinatorSensor(
-                        coordinator=lset.overview,
+                        coordinator=lset.sync,
                         description=desc,
                         unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
                         device_info=league_device,
+                        module_key=MODULE_LEAGUE_OVERVIEW,
                     )
                 )
 
-        if lset.squad_lineup is not None and runtime.is_module_enabled(MODULE_SQUAD_LINEUP):
+        if runtime.is_module_enabled(MODULE_SQUAD_LINEUP):
             for desc in SQUAD_LINEUP_SENSORS:
                 entities.append(
                     KickbaseCoordinatorSensor(
-                        coordinator=lset.squad_lineup,
+                        coordinator=lset.sync,
                         description=desc,
                         unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
                         device_info=league_device,
+                        module_key=MODULE_SQUAD_LINEUP,
                     )
                 )
-            if enable_player_entities and lset.squad_lineup.data:
-                for player in lset.squad_lineup.data.get("squad") or []:
+            squad_sub = (lset.sync.data or {}).get(MODULE_SQUAD_LINEUP) or {}
+            if enable_player_entities and squad_sub:
+                for player in squad_sub.get("squad") or []:
                     pid = player.get("id")
                     if pid:
                         entities.append(
                             KickbasePlayerSensor(
-                                coordinator=lset.squad_lineup,
+                                coordinator=lset.sync,
                                 entry_id=entry.entry_id,
                                 league_id=lid,
                                 player_id=pid,
@@ -429,36 +488,39 @@ async def async_setup_entry(
                             )
                         )
 
-        if lset.market_transfers is not None and runtime.is_module_enabled(MODULE_MARKET_TRANSFERS):
+        if runtime.is_module_enabled(MODULE_MARKET_TRANSFERS):
             for desc in MARKET_TRANSFERS_SENSORS:
                 entities.append(
                     KickbaseCoordinatorSensor(
-                        coordinator=lset.market_transfers,
+                        coordinator=lset.sync,
                         description=desc,
                         unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
                         device_info=league_device,
+                        module_key=MODULE_MARKET_TRANSFERS,
                     )
                 )
 
-        if lset.live_matchday is not None and runtime.is_module_enabled(MODULE_LIVE_MATCHDAY):
+        if runtime.is_module_enabled(MODULE_LIVE_MATCHDAY):
             for desc in LIVE_MATCHDAY_SENSORS:
                 entities.append(
                     KickbaseCoordinatorSensor(
-                        coordinator=lset.live_matchday,
+                        coordinator=lset.sync,
                         description=desc,
                         unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
                         device_info=league_device,
+                        module_key=MODULE_LIVE_MATCHDAY,
                     )
                 )
 
-        if lset.feed_achievements is not None and runtime.is_module_enabled(MODULE_FEED_ACHIEVEMENTS):
+        if runtime.is_module_enabled(MODULE_FEED_ACHIEVEMENTS):
             for desc in FEED_ACHIEVEMENTS_SENSORS:
                 entities.append(
                     KickbaseCoordinatorSensor(
-                        coordinator=lset.feed_achievements,
+                        coordinator=lset.sync,
                         description=desc,
                         unique_id=f"{entry.entry_id}_{lid}_{desc.key}",
                         device_info=league_device,
+                        module_key=MODULE_FEED_ACHIEVEMENTS,
                     )
                 )
 
@@ -466,7 +528,7 @@ async def async_setup_entry(
 
 
 class KickbaseCoordinatorSensor(CoordinatorEntity, SensorEntity):
-    """Generic sensor backed by a Kickbase DataUpdateCoordinator."""
+    """Generic sensor backed by a Kickbase DataUpdateCoordinator (optionally scoped to a sub-module)."""
 
     entity_description: KickbaseSensorDescription
     _attr_has_entity_name = True
@@ -478,16 +540,27 @@ class KickbaseCoordinatorSensor(CoordinatorEntity, SensorEntity):
         description: KickbaseSensorDescription,
         unique_id: str,
         device_info: Any,
+        module_key: str | None = None,
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = unique_id
         self._attr_device_info = device_info
+        self._module_key = module_key
+
+    def _module_data(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
+        if not isinstance(data, dict):
+            return None
+        if self._module_key is None:
+            return data
+        sub = data.get(self._module_key)
+        return sub if isinstance(sub, dict) else None
 
     @property
     def native_value(self) -> Any:
-        data = self.coordinator.data
-        if not isinstance(data, dict):
+        data = self._module_data()
+        if data is None:
             return None
         val = self.entity_description.value_fn(data)
         if isinstance(val, datetime):
@@ -496,8 +569,8 @@ class KickbaseCoordinatorSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        data = self.coordinator.data
-        if not isinstance(data, dict) or self.entity_description.attrs_fn is None:
+        data = self._module_data()
+        if data is None or self.entity_description.attrs_fn is None:
             return None
         return self.entity_description.attrs_fn(data)
 
@@ -531,7 +604,10 @@ class KickbasePlayerSensor(CoordinatorEntity, SensorEntity):
         data = self.coordinator.data
         if not isinstance(data, dict):
             return None
-        for p in data.get("squad") or []:
+        squad_sub = data.get(MODULE_SQUAD_LINEUP) if MODULE_SQUAD_LINEUP in data else data
+        if not isinstance(squad_sub, dict):
+            return None
+        for p in squad_sub.get("squad") or []:
             if p.get("id") == self._player_id:
                 return p
         return None
@@ -548,7 +624,9 @@ class KickbasePlayerSensor(CoordinatorEntity, SensorEntity):
     @property
     def entity_picture(self) -> str | None:
         player = self._find_player()
-        return player.get("image") if player else None
+        if not player:
+            return None
+        return player.get("local_image") or player.get("image")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
@@ -560,10 +638,13 @@ class KickbasePlayerSensor(CoordinatorEntity, SensorEntity):
             "name": player.get("full_name") or player.get("name"),
             "position": (player.get("position") or {}).get("name_de"),
             "status": (player.get("status") or {}).get("label_de"),
+            "status_text": player.get("status_text"),
             "market_value_24h_change": player.get("market_value_24h_change"),
             "market_value_since_buy": player.get("market_value_since_buy"),
             "market_value_trend": player.get("market_value_trend"),
             "total_points": player.get("total_points"),
             "average_points": player.get("average_points"),
             "in_starting_eleven": player.get("in_starting_eleven"),
+            "local_image": player.get("local_image"),
+            "scopes": player.get("scopes"),
         }

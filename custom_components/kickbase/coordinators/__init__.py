@@ -4,23 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from ..api import KickbaseApi
 from ..const import ALL_MODULES
 from .account import AccountCoordinator
 from .global_modules import ChallengesCoordinator, NewsPredictionsCoordinator
-from .league import (
-    FeedAchievementsCoordinator,
-    LeagueOverviewCoordinator,
-    LiveMatchdayCoordinator,
-    MarketTransfersCoordinator,
-    SquadLineupCoordinator,
-)
+
+if TYPE_CHECKING:
+    from ..storage import KickbaseLocalStore
+    from .league import LeagueSyncCoordinator
 
 
 class OnDemandCache:
-    """Short-lived TTL cache for on-demand deep-dive API queries from cards/panel."""
+    """Short-lived TTL cache for non-DB on-demand queries (news/matches/challenges)."""
 
     def __init__(self, default_ttl: int = 300) -> None:
         self._default_ttl = default_ttl
@@ -51,30 +48,16 @@ class OnDemandCache:
 
 @dataclass
 class LeagueCoordinatorSet:
-    """Modular coordinators belonging to a single Kickbase league."""
+    """Consolidated hourly coordinator belonging to a single Kickbase league."""
 
     league_id: str
     league_name: str
     competition_id: str
-    overview: LeagueOverviewCoordinator | None = None
-    squad_lineup: SquadLineupCoordinator | None = None
-    market_transfers: MarketTransfersCoordinator | None = None
-    live_matchday: LiveMatchdayCoordinator | None = None
-    feed_achievements: FeedAchievementsCoordinator | None = None
+    sync: LeagueSyncCoordinator | None = None
 
     def active_coordinators(self) -> list[Any]:
         """Return list of instantiated coordinators for this league."""
-        return [
-            c
-            for c in (
-                self.overview,
-                self.squad_lineup,
-                self.market_transfers,
-                self.live_matchday,
-                self.feed_achievements,
-            )
-            if c is not None
-        ]
+        return [self.sync] if self.sync is not None else []
 
 
 @dataclass
@@ -83,6 +66,7 @@ class KickbaseRuntimeData:
 
     api: KickbaseApi
     account: AccountCoordinator
+    store: KickbaseLocalStore
     enabled_modules: set[str]
     league_ids: list[str]
     primary_league_id: str

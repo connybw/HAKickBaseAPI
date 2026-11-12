@@ -1,4 +1,4 @@
-"""Home Assistant WebSocket API for modular Kickbase cards and sidebar panel."""
+"""Home Assistant WebSocket API for modular Kickbase cards, panel & local DB."""
 
 from __future__ import annotations
 
@@ -95,16 +95,10 @@ def _build_snapshot_payload(
     leagues_meta = []
     for lid, lset in runtime.leagues.items():
         acc_l = account_leagues.get(lid) or {}
-        ov_l = (
-            (lset.overview.data or {}).get("league", {})
-            if lset.overview and lset.overview.data
-            else {}
-        )
-        ov_me = (
-            (lset.overview.data or {}).get("me", {})
-            if lset.overview and lset.overview.data
-            else {}
-        )
+        sync_data = (lset.sync.data or {}) if lset.sync else {}
+        ov_sub = sync_data.get(MODULE_LEAGUE_OVERVIEW) or {}
+        ov_l = ov_sub.get("league", {}) if isinstance(ov_sub, dict) else {}
+        ov_me = ov_sub.get("me", {}) if isinstance(ov_sub, dict) else {}
         leagues_meta.append(
             {
                 "id": lid,
@@ -119,15 +113,22 @@ def _build_snapshot_payload(
         )
 
     league_data: dict[str, Any] = {}
+    db_stats: dict[str, Any] | None = None
+    last_sync_at: str | None = None
+    last_api_requests: int = 0
     if selected_league_id and selected_league_id in runtime.leagues:
         lset = runtime.leagues[selected_league_id]
+        sync_data = (lset.sync.data or {}) if lset.sync else {}
         league_data = {
-            MODULE_LEAGUE_OVERVIEW: lset.overview.data if lset.overview else None,
-            MODULE_SQUAD_LINEUP: lset.squad_lineup.data if lset.squad_lineup else None,
-            MODULE_MARKET_TRANSFERS: lset.market_transfers.data if lset.market_transfers else None,
-            MODULE_LIVE_MATCHDAY: lset.live_matchday.data if lset.live_matchday else None,
-            MODULE_FEED_ACHIEVEMENTS: lset.feed_achievements.data if lset.feed_achievements else None,
+            MODULE_LEAGUE_OVERVIEW: sync_data.get(MODULE_LEAGUE_OVERVIEW),
+            MODULE_SQUAD_LINEUP: sync_data.get(MODULE_SQUAD_LINEUP),
+            MODULE_MARKET_TRANSFERS: sync_data.get(MODULE_MARKET_TRANSFERS),
+            MODULE_LIVE_MATCHDAY: sync_data.get(MODULE_LIVE_MATCHDAY),
+            MODULE_FEED_ACHIEVEMENTS: sync_data.get(MODULE_FEED_ACHIEVEMENTS),
         }
+        db_stats = sync_data.get("db_stats")
+        last_sync_at = sync_data.get("last_sync_at")
+        last_api_requests = int(sync_data.get("last_api_requests") or 0)
 
     entries_meta = []
     for e in entries:
@@ -152,6 +153,9 @@ def _build_snapshot_payload(
         "selected_league_id": selected_league_id,
         "leagues": leagues_meta,
         "league_data": league_data,
+        "db_stats": db_stats,
+        "last_sync_at": last_sync_at,
+        "last_api_requests": last_api_requests,
         MODULE_NEWS_PREDICTIONS: runtime.news_predictions.data if runtime.news_predictions else None,
         MODULE_CHALLENGES: runtime.challenges.data if runtime.challenges else None,
         "event_types": account_data.get("event_types") or {},
@@ -166,6 +170,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_snapshot)
     websocket_api.async_register_command(hass, ws_get_player_detail)
     websocket_api.async_register_command(hass, ws_get_manager_detail)
+    websocket_api.async_register_command(hass, ws_query_local_players)
+    websocket_api.async_register_command(hass, ws_get_db_stats)
     websocket_api.async_register_command(hass, ws_get_match_detail)
     websocket_api.async_register_command(hass, ws_get_news_item)
     websocket_api.async_register_command(hass, ws_search_players)
@@ -205,6 +211,7 @@ def ws_get_snapshot(
         vol.Required("player_id"): str,
         vol.Optional("entry_id"): str,
         vol.Optional("timeframe"): int,
+        vol.Optional("force_refresh"): bool,
     }
 )
 @websocket_api.async_response
@@ -213,15 +220,29 @@ async def ws_get_player_detail(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Fetch full player details, market value history, performance, and transfer history."""
+    """Read player details, MV curve & status history from local SQLite first (0 API calls)."""
     try:
         _, runtime = _resolve_runtime(
             hass, entry_id=msg.get("entry_id"), league_id=msg["league_id"]
         )
         league_id = msg["league_id"]
-        player_id = msg["player_id"]
-        timeframe = msg.get("timeframe") or runtime.market_value_timeframe
+        player_id = str(msg["player_id"])
+        requested_tf = msg.get("timeframe")
+        timeframe = int(requested_tf) if requested_tf else runtime.market_value_timeframe
+        force_refresh = bool(msg.get("force_refresh", False))
 
+        # 1. Serve directly from local SQLite database unless caller forces a live refresh
+        if not force_refresh:
+            local_data = await runtime.store.async_get_player_detail(
+                league_id,
+                player_id,
+                days=int(requested_tf) if requested_tf else None,
+            )
+            if local_data is not None:
+                connection.send_result(msg["id"], local_data)
+                return
+
+        # 2. On-demand API fallback (e.g. for an unowned search result not in bulk scope)
         async def _fetch() -> dict[str, Any]:
             ibp = runtime.api.client.image_base_url
             details, mv_raw, perf_raw, transfers_raw, history_raw = await asyncio.gather(
@@ -241,6 +262,9 @@ async def ws_get_player_detail(
                 else None
             )
             norm["prob_history"] = details.get("ph", []) if isinstance(details, dict) else []
+            mv_series = normalize_market_value_series(mv_raw if isinstance(mv_raw, dict) else {})
+            perf_list = (perf_raw.get("it") or []) if isinstance(perf_raw, dict) else []
+            transfers_dict = transfers_raw if isinstance(transfers_raw, dict) else {}
 
             history_items = []
             for h in (history_raw.get("it") or []) if isinstance(history_raw, dict) else []:
@@ -256,17 +280,20 @@ async def ws_get_player_detail(
                 )
 
             return {
+                "from_local_db": False,
                 "player": norm,
-                "market_value": normalize_market_value_series(
-                    mv_raw if isinstance(mv_raw, dict) else {}
-                ),
-                "performance": (perf_raw.get("it") or []) if isinstance(perf_raw, dict) else [],
-                "transfers": transfers_raw if isinstance(transfers_raw, dict) else {},
+                "market_value": mv_series,
+                "status_history": [],
+                "performance": perf_list,
+                "transfers": transfers_dict,
                 "transfer_history": history_items,
             }
 
         data = await runtime.cache.get_or_fetch(
-            f"player:{league_id}:{player_id}:{timeframe}", _fetch, ttl=600
+            f"player:{league_id}:{player_id}:{timeframe}",
+            _fetch,
+            ttl=600,
+            force=force_refresh,
         )
         connection.send_result(msg["id"], data)
     except (ValueError, KickbaseError) as err:
@@ -279,6 +306,7 @@ async def ws_get_player_detail(
         vol.Required("league_id"): str,
         vol.Required("manager_id"): str,
         vol.Optional("entry_id"): str,
+        vol.Optional("force_refresh"): bool,
     }
 )
 @websocket_api.async_response
@@ -287,13 +315,20 @@ async def ws_get_manager_detail(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Fetch rival manager dashboard, squad, performance, and transfer history."""
+    """Serve rival manager dashboard, squad & transfers from local SQLite first."""
     try:
         _, runtime = _resolve_runtime(
             hass, entry_id=msg.get("entry_id"), league_id=msg["league_id"]
         )
         league_id = msg["league_id"]
-        manager_id = msg["manager_id"]
+        manager_id = str(msg["manager_id"])
+        force_refresh = bool(msg.get("force_refresh", False))
+
+        if not force_refresh:
+            local_mgr = await runtime.store.async_get_manager_detail(league_id, manager_id)
+            if local_mgr is not None:
+                connection.send_result(msg["id"], local_mgr)
+                return
 
         async def _fetch() -> dict[str, Any]:
             ibp = runtime.api.client.image_base_url
@@ -321,6 +356,7 @@ async def ws_get_manager_detail(
                 for t in ((transfers.get("it") or []) if isinstance(transfers, dict) else [])
             ]
             return {
+                "from_local_db": False,
                 "dashboard": {
                     "id": str(dash.get("u", manager_id)) if isinstance(dash, dict) else manager_id,
                     "name": dash.get("unm") if isinstance(dash, dict) else "Manager",
@@ -340,11 +376,79 @@ async def ws_get_manager_detail(
             }
 
         data = await runtime.cache.get_or_fetch(
-            f"manager:{league_id}:{manager_id}", _fetch, ttl=300
+            f"manager:{league_id}:{manager_id}",
+            _fetch,
+            ttl=300,
+            force=force_refresh,
         )
         connection.send_result(msg["id"], data)
     except (ValueError, KickbaseError) as err:
         connection.send_error(msg["id"], "kickbase_error", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "kickbase/query_local_players",
+        vol.Required("league_id"): str,
+        vol.Optional("entry_id"): str,
+        vol.Optional("query"): str,
+        vol.Optional("scope"): str,
+        vol.Optional("status_severity"): str,
+        vol.Optional("limit"): int,
+    }
+)
+@websocket_api.async_response
+async def ws_query_local_players(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Query locally cached SQLite player database without Kickbase API requests."""
+    try:
+        _, runtime = _resolve_runtime(
+            hass, entry_id=msg.get("entry_id"), league_id=msg["league_id"]
+        )
+        league_id = msg["league_id"]
+        players, stats = await asyncio.gather(
+            runtime.store.async_query_players(
+                league_id,
+                query=str(msg.get("query") or ""),
+                scope=msg.get("scope"),
+                status_severity=msg.get("status_severity"),
+                limit=int(msg.get("limit") or 120),
+            ),
+            runtime.store.async_get_stats(league_id),
+        )
+        connection.send_result(
+            msg["id"],
+            {"from_local_db": True, "players": players, "stats": stats},
+        )
+    except ValueError as err:
+        connection.send_error(msg["id"], "not_found", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "kickbase/get_db_stats",
+        vol.Optional("league_id"): str,
+        vol.Optional("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_get_db_stats(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return local SQLite database metrics and recent sync runs."""
+    try:
+        _, runtime = _resolve_runtime(
+            hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
+        )
+        stats = await runtime.store.async_get_stats(msg.get("league_id"))
+        connection.send_result(msg["id"], stats)
+    except ValueError as err:
+        connection.send_error(msg["id"], "not_found", str(err))
 
 
 @websocket_api.websocket_command(
@@ -465,7 +569,7 @@ async def ws_search_players(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Search players across a competition."""
+    """Search players across a competition (checks local DB first when offline/online)."""
     try:
         _, runtime = _resolve_runtime(
             hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
@@ -536,6 +640,7 @@ async def ws_get_challenge_detail(
         vol.Optional("entry_id"): str,
         vol.Optional("league_id"): str,
         vol.Optional("module"): str,
+        vol.Optional("force_details"): bool,
     }
 )
 @websocket_api.async_response
@@ -544,34 +649,24 @@ async def ws_refresh(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Manually trigger refresh of specific module or entire league and return updated snapshot."""
+    """Manually trigger consolidated sync or global module refresh and return snapshot."""
     try:
         entry, runtime = _resolve_runtime(
             hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
         )
         target_league = msg.get("league_id") or runtime.primary_league_id
         module = msg.get("module")
+        force_details = bool(msg.get("force_details", False))
         tasks = []
-
-        if target_league in runtime.leagues:
-            lset = runtime.leagues[target_league]
-            mapping = {
-                MODULE_LEAGUE_OVERVIEW: lset.overview,
-                MODULE_SQUAD_LINEUP: lset.squad_lineup,
-                MODULE_MARKET_TRANSFERS: lset.market_transfers,
-                MODULE_LIVE_MATCHDAY: lset.live_matchday,
-                MODULE_FEED_ACHIEVEMENTS: lset.feed_achievements,
-            }
-            if module and module in mapping and mapping[module] is not None:
-                tasks.append(mapping[module].async_request_refresh())
-            elif not module:
-                for coord in lset.active_coordinators():
-                    tasks.append(coord.async_request_refresh())
 
         if module == MODULE_NEWS_PREDICTIONS and runtime.news_predictions is not None:
             tasks.append(runtime.news_predictions.async_request_refresh())
         elif module == MODULE_CHALLENGES and runtime.challenges is not None:
             tasks.append(runtime.challenges.async_request_refresh())
+        elif target_league in runtime.leagues:
+            lset = runtime.leagues[target_league]
+            if lset.sync is not None:
+                tasks.append(lset.sync.async_trigger_sync(force_full_details=force_details))
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

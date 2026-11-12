@@ -1,15 +1,20 @@
 /**
  * Kickbase Sidebar Panel for Home Assistant.
- * Renders a modular multi-league Command Center reusing the standalone card components.
+ * Renders a modular multi-league Command Center reusing the standalone card components
+ * plus an integrated Local SQLite Player Database & History Explorer.
  */
 
 import {
   KICKBASE_CSS,
   escapeHtml,
   formatCompactEur,
+  formatDateTime,
+  formatSignedCompactEur,
   kickbaseStore,
   openKickbaseModal,
+  playerImg,
   positionClass,
+  teamImg,
 } from "./kickbase-shared.js?v=1.0.0";
 import "./kickbase-cards.js?v=1.0.0";
 
@@ -23,6 +28,13 @@ const PANEL_MODULES = [
   { id: "feed", label: "Feed, News & Prognosen", tag: "kickbase-feed-news-card", requiresAny: ["feed_achievements", "news_predictions"] },
   { id: "challenges", label: "Challenges", tag: "kickbase-challenges-card", requires: "challenges" },
 ];
+
+const SCOPE_LABELS = {
+  my_squad: "Mein Kader",
+  market: "Markt",
+  rival_squad: "Anderes Team",
+  scouted: "Scout",
+};
 
 const STORAGE_KEY = "kickbase_ha_panel_hidden_cards_v1";
 
@@ -38,8 +50,18 @@ class KickbasePanel extends HTMLElement {
     this._loading = false;
     this._searchQuery = "";
     this._searchResults = [];
+    this._searchOnlineMode = false;
     this._searchTimer = null;
     this._hiddenCards = this._loadHiddenCards();
+
+    // Local DB Explorer state
+    this._dbScope = "all";
+    this._dbStatus = "all";
+    this._dbQuery = "";
+    this._dbPlayers = [];
+    this._dbStats = null;
+    this._dbLoading = false;
+    this._dbLoadedLeague = null;
   }
 
   _loadHiddenCards() {
@@ -91,11 +113,41 @@ class KickbasePanel extends HTMLElement {
       if (!this._selectedLeagueId && this._snapshot?.selected_league_id) {
         this._selectedLeagueId = this._snapshot.selected_league_id;
       }
+      if (this._snapshot?.db_stats) {
+        this._dbStats = this._snapshot.db_stats;
+      }
     } catch (err) {
       this._error = err?.message || String(err);
     } finally {
       this._loading = false;
       this._render();
+      if (this._activeTab === "local_db") {
+        this._loadLocalDbPlayers();
+      }
+    }
+  }
+
+  async _loadLocalDbPlayers() {
+    const lid = this._selectedLeagueId || this._snapshot?.selected_league_id;
+    if (!this._hass || !lid || this._dbLoading) return;
+    this._dbLoading = true;
+    this._renderLocalDbView();
+    try {
+      const res = await kickbaseStore.queryLocalPlayers(this._hass, {
+        leagueId: lid,
+        query: this._dbQuery,
+        scope: this._dbScope,
+        statusSeverity: this._dbStatus,
+        limit: 150,
+      });
+      this._dbPlayers = res?.players || [];
+      if (res?.stats) this._dbStats = res.stats;
+      this._dbLoadedLeague = lid;
+    } catch {
+      // keep existing state on transient error
+    } finally {
+      this._dbLoading = false;
+      this._renderLocalDbView();
     }
   }
 
@@ -136,9 +188,11 @@ class KickbasePanel extends HTMLElement {
     const activeLeague = leagues.find((l) => l.id === this._selectedLeagueId) || leagues[0];
     const enabled = new Set(snap?.enabled_modules || []);
     const availableCards = PANEL_MODULES.filter((m) => this._isModuleAvailable(m));
+    const dbStats = this._dbStats || snap?.db_stats;
 
     const tabs = [
       { id: "dashboard", label: "Modulares Dashboard", show: true },
+      { id: "local_db", label: `💾 Lokale Datenbank${dbStats ? ` (${dbStats.players_count ?? 0})` : ""}`, show: Boolean(snap?.configured) },
       { id: "squad", label: "Kader & Aufstellung", show: enabled.has("squad_lineup") },
       { id: "market", label: "Transfermarkt", show: enabled.has("market_transfers") },
       { id: "live", label: "Live & Bundesliga", show: enabled.has("live_matchday") },
@@ -210,8 +264,8 @@ class KickbasePanel extends HTMLElement {
           position: absolute;
           top: calc(100% + 6px);
           right: 0;
-          width: min(360px, 90vw);
-          max-height: 360px;
+          width: min(380px, 90vw);
+          max-height: 380px;
           overflow-y: auto;
           background: #131a24;
           border: 1px solid rgba(255,255,255,0.16);
@@ -232,6 +286,7 @@ class KickbasePanel extends HTMLElement {
               <div class="kb-title" style="font-size:18px">Kickbase Command Center</div>
               <div class="kb-subtitle">
                 ${escapeHtml(user.name || "Manager")} ${user.has_pro ? "· ⭐ Pro" : ""} · Rein lesend
+                ${dbStats ? ` · 💾 ${dbStats.players_count ?? 0} Spieler · 📸 ${dbStats.photos_cached ?? 0} Fotos · Sync ${formatDateTime(snap?.last_sync_at)}` : ""}
               </div>
             </div>
           </div>
@@ -253,11 +308,11 @@ class KickbasePanel extends HTMLElement {
                 : ""
             }
             <div class="kb-search-wrap">
-              <input class="kb-input" id="kb-player-search" type="search" placeholder="Spieler suchen (z. B. Kane)..." value="${escapeHtml(this._searchQuery)}"/>
+              <input class="kb-input" id="kb-player-search" type="search" placeholder="Lokal suchen (0 API-Calls)..." value="${escapeHtml(this._searchQuery)}"/>
               <div id="kb-search-dropdown-slot"></div>
             </div>
             <button class="kb-btn ${this._customizeOpen ? "active" : ""}" id="kb-customize-btn">⚙ Module</button>
-            <button class="kb-btn" id="kb-panel-refresh">${this._loading ? "⏳ Lädt..." : "↻ Aktualisieren"}</button>
+            <button class="kb-btn" id="kb-panel-refresh" title="Stündlichen Liga-Sync sofort ausführen">${this._loading ? "⏳ Sync läuft..." : "↻ Sync"}</button>
           </div>
         </div>
 
@@ -285,19 +340,29 @@ class KickbasePanel extends HTMLElement {
             .join("")}
         </div>
 
-        <div class="kb-grid" id="kb-cards-grid"></div>
+        <div id="kb-main-content"></div>
       </div>
     `;
 
-    // Mount modular cards into grid
-    const grid = this.shadowRoot.getElementById("kb-cards-grid");
+    const mainContent = this.shadowRoot.getElementById("kb-main-content");
     if (this._error) {
-      grid.innerHTML = `<div class="kb-empty">Fehler beim Laden: ${escapeHtml(this._error)}</div>`;
+      mainContent.innerHTML = `<div class="kb-empty">Fehler beim Laden: ${escapeHtml(this._error)}</div>`;
     } else if (!snap) {
-      grid.innerHTML = `<div class="kb-empty">Lade Kickbase-Module...</div>`;
+      mainContent.innerHTML = `<div class="kb-empty">Lade Kickbase-Module...</div>`;
     } else if (!snap.configured) {
-      grid.innerHTML = `<div class="kb-empty">Bitte richte zuerst die Kickbase-Integration unter Einstellungen → Geräte & Dienste ein.</div>`;
+      mainContent.innerHTML = `<div class="kb-empty">Bitte richte zuerst die Kickbase-Integration unter Einstellungen → Geräte & Dienste ein.</div>`;
+    } else if (this._activeTab === "local_db") {
+      mainContent.innerHTML = `<div id="kb-local-db-slot"></div>`;
+      this._renderLocalDbView();
+      const targetLid = this._selectedLeagueId || activeLeague?.id;
+      if (this._dbLoadedLeague !== targetLid && !this._dbLoading) {
+        this._loadLocalDbPlayers();
+      }
     } else {
+      const grid = document.createElement("div");
+      grid.className = "kb-grid";
+      mainContent.appendChild(grid);
+
       const cards = this._visibleCardsForTab();
       for (const modDef of cards) {
         const el = document.createElement(modDef.tag);
@@ -319,34 +384,230 @@ class KickbasePanel extends HTMLElement {
     this._bindEvents(activeLeague);
   }
 
-  _renderSearchDropdown(activeLeague) {
-    const slot = this.shadowRoot.getElementById("kb-search-dropdown-slot");
+  _renderLocalDbView() {
+    const slot = this.shadowRoot.getElementById("kb-local-db-slot");
     if (!slot) return;
-    if (!this._searchResults.length) {
-      slot.innerHTML = "";
-      return;
-    }
+    const stats = this._dbStats || this._snapshot?.db_stats || {};
+    const activeLeagueId = this._selectedLeagueId || this._snapshot?.selected_league_id;
+    const players = this._dbPlayers || [];
+
     slot.innerHTML = `
-      <div class="kb-search-dropdown">
+      <div class="kb-card">
+        <div class="kb-card-header">
+          <div class="kb-title-wrap">
+            <div class="kb-badge-icon">DB</div>
+            <div>
+              <div class="kb-title">Lokale SQLite Spieler-Datenbank & Historie</div>
+              <div class="kb-subtitle">
+                Gebündelter Stündlicher Sync · Abfragen hier kosten 0 Kickbase-API-Requests · Letzter Sync: ${formatDateTime(stats.last_sync_at || this._snapshot?.last_sync_at)}
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="kb-btn" id="kb-db-sync-now" ${this._loading ? "disabled" : ""}>${this._loading ? "⏳ Sync..." : "↻ Jetzt synchronisieren"}</button>
+            <button class="kb-btn" id="kb-db-sync-full" ${this._loading ? "disabled" : ""} title="Erzwingt kompletten Historien-Download für alle Spieler">📊 Komplette Historie laden</button>
+          </div>
+        </div>
+
+        <div class="kb-kpi-grid" style="margin-bottom:14px">
+          <div class="kb-kpi">
+            <div class="kb-kpi-label">Spieler lokal</div>
+            <div class="kb-kpi-val">${stats.players_count ?? 0}</div>
+            <div class="kb-kpi-sub">Kader ${stats.my_squad_count ?? 0} · Markt ${stats.market_count ?? 0} · Rivalen ${stats.rival_players_count ?? 0}</div>
+          </div>
+          <div class="kb-kpi">
+            <div class="kb-kpi-label">Marktwert-Punkte</div>
+            <div class="kb-kpi-val">${stats.market_value_points ?? 0}</div>
+            <div class="kb-kpi-sub">Tägliche Verläufe in SQLite</div>
+          </div>
+          <div class="kb-kpi">
+            <div class="kb-kpi-label">Status-Ereignisse</div>
+            <div class="kb-kpi-val">${stats.status_events_count ?? 0}</div>
+            <div class="kb-kpi-sub">Verletzungen, Besitzer & Marktwechsel</div>
+          </div>
+          <div class="kb-kpi">
+            <div class="kb-kpi-label">Foto-Cache & DB</div>
+            <div class="kb-kpi-val">${stats.photos_cached ?? 0} Fotos</div>
+            <div class="kb-kpi-sub">${stats.db_size_kb ?? 0} KB SQLite · ${(stats.last_sync?.api_requests ?? this._snapshot?.last_api_requests ?? 0)} API-Calls zuletzt</div>
+          </div>
+        </div>
+
+        <div class="kb-tabs" style="align-items:center">
+          <button class="kb-btn ${this._dbScope === "all" ? "active" : ""}" data-db-scope="all">Alle</button>
+          <button class="kb-btn ${this._dbScope === "my_squad" ? "active" : ""}" data-db-scope="my_squad">Mein Kader</button>
+          <button class="kb-btn ${this._dbScope === "market" ? "active" : ""}" data-db-scope="market">Transfermarkt</button>
+          <button class="kb-btn ${this._dbScope === "rival_squad" ? "active" : ""}" data-db-scope="rival_squad">Andere Manager</button>
+          <button class="kb-btn ${this._dbScope === "scouted" ? "active" : ""}" data-db-scope="scouted">Scout-Liste</button>
+          <span style="flex:1"></span>
+          <button class="kb-btn ${this._dbStatus === "all" ? "active" : ""}" data-db-status="all">Alle Status</button>
+          <button class="kb-btn ${this._dbStatus === "issues" ? "active" : ""}" data-db-status="issues">⚠ Probleme</button>
+          <button class="kb-btn ${this._dbStatus === "ok" ? "active" : ""}" data-db-status="ok">Fit</button>
+          <input class="kb-input" id="kb-db-filter-input" type="search" placeholder="Name / Manager filtern..." value="${escapeHtml(this._dbQuery)}"/>
+        </div>
+
         <div class="kb-list">
-          ${this._searchResults
-            .map(
-              (p) => `
-              <div class="kb-row clickable" data-search-player-id="${escapeHtml(p.id)}">
-                <div class="kb-row-left">
-                  ${p.image ? `<img class="kb-avatar" src="${escapeHtml(p.image)}"/>` : ""}
-                  <div class="kb-row-main">
-                    <div class="kb-row-name">${escapeHtml(p.name)}</div>
-                    <div class="kb-row-meta"><span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span> · ${escapeHtml(p.owner_name || "Kickbase")}</div>
-                  </div>
-                </div>
-                <div class="kb-row-val">${formatCompactEur(p.market_value)}</div>
-              </div>`
-            )
-            .join("")}
+          ${
+            this._dbLoading && !players.length
+              ? `<div class="kb-empty">Lade lokale Datenbank...</div>`
+              : players.length
+              ? players
+                  .map((p) => {
+                    const chg = Number(p.market_value_24h_change || 0);
+                    const pImg = playerImg(p);
+                    const tImg = teamImg(p);
+                    const scopeBadges = (p.scopes || [])
+                      .map((sc) => `<span class="kb-pill" style="padding:1px 6px;font-size:10px">${escapeHtml(SCOPE_LABELS[sc] || sc)}</span>`)
+                      .join("");
+                    return `
+                      <div class="kb-row clickable" data-db-player-id="${escapeHtml(p.id)}">
+                        <div class="kb-row-left">
+                          ${pImg ? `<img class="kb-avatar" src="${escapeHtml(pImg)}" loading="lazy"/>` : ""}
+                          ${tImg ? `<img class="kb-crest" src="${escapeHtml(tImg)}" loading="lazy"/>` : ""}
+                          <div class="kb-row-main">
+                            <div class="kb-row-name">${escapeHtml(p.full_name || p.name)}</div>
+                            <div class="kb-row-meta">
+                              <span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span>
+                              <span class="kb-pill ${escapeHtml(p.status?.severity || "ok")}" style="padding:1px 6px;font-size:10px">${escapeHtml(p.status?.label_de || "Fit")}</span>
+                              ${scopeBadges}
+                              <span>Besitzer: ${escapeHtml(p.owner_name || "Kickbase")}</span>
+                              <span>· Ø ${p.average_points ?? 0}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="kb-row-right">
+                          <div class="kb-row-val">${formatCompactEur(p.market_value)}</div>
+                          <div class="kb-row-sub ${chg >= 0 ? "kb-pos" : "kb-neg"}">${formatSignedCompactEur(chg)} (24h)</div>
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join("")
+              : `<div class="kb-empty">Keine Spieler in diesem Filter in der lokalen Datenbank gefunden.</div>`
+          }
         </div>
       </div>
     `;
+
+    slot.querySelectorAll("[data-db-scope]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._dbScope = btn.dataset.dbScope;
+        this._loadLocalDbPlayers();
+      })
+    );
+    slot.querySelectorAll("[data-db-status]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._dbStatus = btn.dataset.dbStatus;
+        this._loadLocalDbPlayers();
+      })
+    );
+    const filterInput = slot.querySelector("#kb-db-filter-input");
+    if (filterInput) {
+      filterInput.addEventListener("input", (e) => {
+        this._dbQuery = e.target.value;
+        this._loadLocalDbPlayers();
+      });
+    }
+    slot.querySelector("#kb-db-sync-now")?.addEventListener("click", () => {
+      this._triggerSync(activeLeagueId, false);
+    });
+    slot.querySelector("#kb-db-sync-full")?.addEventListener("click", () => {
+      this._triggerSync(activeLeagueId, true);
+    });
+    slot.querySelectorAll("[data-db-player-id]").forEach((row) =>
+      row.addEventListener("click", () => {
+        openKickbaseModal(this.shadowRoot, this._hass, "player", {
+          leagueId: activeLeagueId,
+          playerId: row.dataset.dbPlayerId,
+        });
+      })
+    );
+  }
+
+  async _triggerSync(leagueId, forceDetails = false) {
+    if (!this._hass || this._loading) return;
+    this._loading = true;
+    this._render();
+    try {
+      this._snapshot = await kickbaseStore.refresh(this._hass, {
+        leagueId,
+        forceDetails,
+      });
+      if (this._snapshot?.db_stats) {
+        this._dbStats = this._snapshot.db_stats;
+      }
+      this._error = null;
+    } catch (err) {
+      this._error = err?.message || String(err);
+    } finally {
+      this._loading = false;
+      this._render();
+      if (this._activeTab === "local_db") {
+        this._loadLocalDbPlayers();
+      }
+    }
+  }
+
+  _renderSearchDropdown(activeLeague) {
+    const slot = this.shadowRoot.getElementById("kb-search-dropdown-slot");
+    if (!slot) return;
+    const q = this._searchQuery.trim();
+    if (!this._searchResults.length && (!q || q.length < 2)) {
+      slot.innerHTML = "";
+      return;
+    }
+    if (!this._searchResults.length && q.length >= 2) {
+      slot.innerHTML = `
+        <div class="kb-search-dropdown">
+          <div class="kb-empty" style="padding:10px">Kein Treffer in der lokalen DB.</div>
+          <button class="kb-btn" style="width:100%;justify-content:center;margin-top:6px" id="kb-search-online-btn">🌐 Online in Bundesliga suchen</button>
+        </div>
+      `;
+    } else {
+      slot.innerHTML = `
+        <div class="kb-search-dropdown">
+          <div style="font-size:10px;color:var(--kb-muted);padding:2px 6px 6px;display:flex;justify-content:space-between">
+            <span>${this._searchOnlineMode ? "🌐 Live Bundesliga-Suche" : "💾 Lokale Datenbank (0 API-Calls)"}</span>
+            ${!this._searchOnlineMode ? `<a href="#" id="kb-search-online-btn" style="color:var(--kb-accent)">Online erweitern</a>` : ""}
+          </div>
+          <div class="kb-list">
+            ${this._searchResults
+              .map(
+                (p) => `
+                <div class="kb-row clickable" data-search-player-id="${escapeHtml(p.id)}">
+                  <div class="kb-row-left">
+                    ${playerImg(p) ? `<img class="kb-avatar" src="${escapeHtml(playerImg(p))}"/>` : ""}
+                    <div class="kb-row-main">
+                      <div class="kb-row-name">${escapeHtml(p.full_name || p.name)}</div>
+                      <div class="kb-row-meta"><span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span> · ${escapeHtml(p.owner_name || "Kickbase")}</div>
+                    </div>
+                  </div>
+                  <div class="kb-row-val">${formatCompactEur(p.market_value)}</div>
+                </div>`
+              )
+              .join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    slot.querySelector("#kb-search-online-btn")?.addEventListener("click", async (e) => {
+      e.preventDefault();
+      if (!this._hass || q.length < 2) return;
+      try {
+        const res = await this._hass.callWS({
+          type: "kickbase/search_players",
+          competition_id: activeLeague?.competition_id || "1",
+          league_id: activeLeague?.id,
+          query: q,
+        });
+        this._searchOnlineMode = true;
+        this._searchResults = res?.players || [];
+        this._renderSearchDropdown(activeLeague);
+      } catch {
+        // ignore transient search errors
+      }
+    });
+
     slot.querySelectorAll("[data-search-player-id]").forEach((row) => {
       row.addEventListener("click", () => {
         const pid = row.dataset.searchPlayerId;
@@ -367,6 +628,7 @@ class KickbasePanel extends HTMLElement {
 
     this.shadowRoot.getElementById("kb-league-select")?.addEventListener("change", (e) => {
       this._selectedLeagueId = e.target.value;
+      this._dbLoadedLeague = null;
       this._loadSnapshot(false);
     });
 
@@ -375,21 +637,8 @@ class KickbasePanel extends HTMLElement {
       this._render();
     });
 
-    this.shadowRoot.getElementById("kb-panel-refresh")?.addEventListener("click", async () => {
-      if (!this._hass || this._loading) return;
-      this._loading = true;
-      this._render();
-      try {
-        this._snapshot = await kickbaseStore.refresh(this._hass, {
-          leagueId: this._selectedLeagueId || activeLeague?.id,
-        });
-        this._error = null;
-      } catch (err) {
-        this._error = err?.message || String(err);
-      } finally {
-        this._loading = false;
-        this._render();
-      }
+    this.shadowRoot.getElementById("kb-panel-refresh")?.addEventListener("click", () => {
+      this._triggerSync(this._selectedLeagueId || activeLeague?.id, false);
     });
 
     this.shadowRoot.querySelectorAll("[data-toggle-card]").forEach((btn) => {
@@ -413,6 +662,7 @@ class KickbasePanel extends HTMLElement {
     if (searchInput) {
       searchInput.addEventListener("input", (e) => {
         this._searchQuery = e.target.value;
+        this._searchOnlineMode = false;
         clearTimeout(this._searchTimer);
         const q = this._searchQuery.trim();
         if (q.length < 2) {
@@ -421,19 +671,20 @@ class KickbasePanel extends HTMLElement {
           return;
         }
         this._searchTimer = setTimeout(async () => {
+          const lid = this._selectedLeagueId || activeLeague?.id;
+          if (!lid) return;
           try {
-            const res = await this._hass.callWS({
-              type: "kickbase/search_players",
-              competition_id: activeLeague?.competition_id || "1",
-              league_id: activeLeague?.id,
+            const res = await kickbaseStore.queryLocalPlayers(this._hass, {
+              leagueId: lid,
               query: q,
+              limit: 20,
             });
             this._searchResults = res?.players || [];
             this._renderSearchDropdown(activeLeague);
           } catch {
             // ignore transient search errors
           }
-        }, 320);
+        }, 180);
       });
     }
   }

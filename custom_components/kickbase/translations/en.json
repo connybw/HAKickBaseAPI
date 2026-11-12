@@ -17,13 +17,17 @@
         }
       },
       "modules": {
-        "title": "Modular Data Packages & UI",
-        "description": "Select the Kickbase modules to enable. You can change them anytime in options.",
+        "title": "Modular Data Packages, Sync & Local DB",
+        "description": "Market, your squad, and all rival managers' squads are fetched together in one consolidated sync (default: every 3600 s = 1 hour) and cached locally in SQLite + photo storage.",
         "data": {
           "primary_league": "Primary League",
           "modules": "Enabled Modules",
           "enable_sidebar_panel": "Enable Kickbase Sidebar Panel",
           "enable_player_entities": "Create per-player squad sensors",
+          "cache_photos": "Cache player & club photos locally (skip existing files)",
+          "fetch_player_details": "Store player details, status & market value history locally",
+          "adaptive_live_polling": "Adaptive 60 s live matchday polling",
+          "sync_interval": "Consolidated league & DB sync interval (s)",
           "market_value_timeframe": "Market value chart timeframe"
         }
       },
@@ -50,20 +54,20 @@
   "options": {
     "step": {
       "init": {
-        "title": "Kickbase Modules & Intervals",
-        "description": "Customize active leagues, modules, UI panel, and polling intervals (seconds).",
+        "title": "Kickbase Sync, Local DB & Modules",
+        "description": "Customize active leagues, modules, local SQLite/photo caching, and consolidated sync interval (default: 3600 s).",
         "data": {
           "leagues": "Monitored Leagues",
           "primary_league": "Primary League",
           "modules": "Enabled Modules",
           "enable_sidebar_panel": "Enable Kickbase Sidebar Panel",
           "enable_player_entities": "Create per-player squad sensors",
+          "cache_photos": "Cache player & club photos locally",
+          "fetch_player_details": "Store player details & market value history locally",
+          "adaptive_live_polling": "Adaptive 60 s live matchday polling",
+          "sync_interval": "Consolidated league sync interval (default: 3600 s)",
           "market_value_timeframe": "Market value chart timeframe",
-          "interval_league_overview": "Interval: League Overview & Budget (s)",
-          "interval_squad_lineup": "Interval: Squad & Lineup (s)",
-          "interval_market_transfers": "Interval: Market & Scouted (s)",
-          "interval_live_matchday": "Interval: Live Matchday Idle (s)",
-          "interval_feed_achievements": "Interval: Feed & Achievements (s)",
+          "interval_account": "Interval: Account & League Discovery (s)",
           "interval_news_predictions": "Interval: News & Predictions (s)",
           "interval_challenges": "Interval: Challenges & Lobby (s)"
         }

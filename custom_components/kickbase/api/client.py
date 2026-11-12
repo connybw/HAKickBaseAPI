@@ -51,6 +51,12 @@ class KickbaseApiClient:
         self._chat_token: str | None = None
         self._image_base_url: str = DEFAULT_IMAGE_BASE_URL
         self._login_payload: dict[str, Any] = {}
+        self._request_count: int = 0
+
+    @property
+    def request_count(self) -> int:
+        """Return total HTTP API requests made by this client instance."""
+        return self._request_count
 
     @property
     def token(self) -> str | None:
@@ -216,6 +222,7 @@ class KickbaseApiClient:
             needs_relogin = False
             try:
                 async with self._semaphore:
+                    self._request_count += 1
                     async with self._session.request(
                         method_upper,
                         url,
@@ -309,3 +316,23 @@ class KickbaseApiClient:
                 continue
 
         raise KickbaseConnectionError(f"Exhausted retries on {path}")
+
+    async def async_download_bytes(self, url: str) -> tuple[bytes, str] | None:
+        """Strictly read-only GET helper to download static CDN image assets for local cache."""
+        if not url or not url.startswith(("http://", "https://")):
+            return None
+        try:
+            async with self._semaphore:
+                async with self._session.request(
+                    "GET",
+                    url,
+                    headers={"User-Agent": "KickbaseHomeAssistant/1.0"},
+                    timeout=self._timeout,
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.read()
+                    content_type = resp.headers.get("Content-Type", "image/png")
+                    return data, content_type
+        except (aiohttp.ClientError, asyncio.TimeoutError, AttributeError):
+            return None
