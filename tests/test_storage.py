@@ -110,7 +110,7 @@ class TestKickbaseLocalStore(unittest.IsolatedAsyncioTestCase):
             owner_name="Max",
         )
 
-        # Save cached photo & ensure find_cached_photos picks it up
+        # Save cached photo & ensure find_cached_photos + read_photo_bytes pick it up
         local_url = await self.store.async_save_photo(
             "player_4577",
             b"\x89PNG\r\n\x1a\nfake",
@@ -120,6 +120,8 @@ class TestKickbaseLocalStore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(local_url, "/api/kickbase_photos/player_4577.png")
         found = await self.store.async_find_cached_photos(["player_4577", "player_999"])
         self.assertEqual(found, {"player_4577": "/api/kickbase_photos/player_4577.png"})
+        raw_pair = await self.store.async_read_photo_bytes("player_4577")
+        self.assertEqual(raw_pair, (b"\x89PNG\r\n\x1a\nfake", "image/png"))
         p_kane["local_image"] = found["player_4577"]
 
         changes_1 = await self.store.async_upsert_bulk_sync(
@@ -259,6 +261,20 @@ class TestKickbaseLocalStore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["rival_players_count"], 1)
         self.assertEqual(stats["photos_cached"], 1)
         self.assertEqual(len(stats["recent_runs"]), 3)
+
+        # Snapshot persistence roundtrip
+        await self.store.async_save_snapshots_batch(
+            {
+                "league:2001": {"league_overview": {"league": {"id": "2001", "name": "Test"}}},
+                "news_item:n1": {"id": "n1", "title": "Cached Article"},
+            }
+        )
+        snap, updated = await self.store.async_get_snapshot("league:2001")
+        self.assertIsNotNone(snap)
+        self.assertIsNotNone(updated)
+        self.assertEqual(snap["league_overview"]["league"]["name"], "Test")
+        missing, _ = await self.store.async_get_snapshot("does_not_exist")
+        self.assertIsNone(missing)
 
 
 if __name__ == "__main__":

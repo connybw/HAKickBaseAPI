@@ -69,7 +69,7 @@ def _resolve_runtime(
     return entries[0], entries[0].runtime_data
 
 
-def _build_snapshot_payload(
+async def _async_build_snapshot_payload(
     hass: HomeAssistant,
     entry_id: str | None = None,
     league_id: str | None = None,
@@ -79,7 +79,9 @@ def _build_snapshot_payload(
         return {"configured": False, "entries": []}
 
     selected_entry, runtime = _resolve_runtime(hass, entry_id=entry_id, league_id=league_id)
-    account_data = runtime.account.data or {}
+
+    db_account, _ = await runtime.store.async_get_snapshot("account")
+    account_data = db_account if isinstance(db_account, dict) else (runtime.account.data or {})
     account_leagues = account_data.get("leagues") or {}
 
     selected_league_id = (
@@ -92,10 +94,16 @@ def _build_snapshot_payload(
         )
     )
 
+    league_snaps: dict[str, dict[str, Any]] = {}
+    for lid in runtime.leagues:
+        snap, _ = await runtime.store.async_get_snapshot(f"league:{lid}")
+        if isinstance(snap, dict):
+            league_snaps[lid] = snap
+
     leagues_meta = []
     for lid, lset in runtime.leagues.items():
         acc_l = account_leagues.get(lid) or {}
-        sync_data = (lset.sync.data or {}) if lset.sync else {}
+        sync_data = league_snaps.get(lid) or ((lset.sync.data or {}) if lset.sync else {})
         ov_sub = sync_data.get(MODULE_LEAGUE_OVERVIEW) or {}
         ov_l = ov_sub.get("league", {}) if isinstance(ov_sub, dict) else {}
         ov_me = ov_sub.get("me", {}) if isinstance(ov_sub, dict) else {}
@@ -105,7 +113,8 @@ def _build_snapshot_payload(
                 "name": ov_l.get("name") or lset.league_name,
                 "competition_id": ov_l.get("competition_id") or lset.competition_id,
                 "competition_name": ov_l.get("competition_name") or acc_l.get("competition_name") or "Bundesliga",
-                "image": ov_l.get("image") or acc_l.get("image"),
+                "image": ov_l.get("local_image") or ov_l.get("image") or acc_l.get("local_image") or acc_l.get("image"),
+                "local_image": ov_l.get("local_image") or acc_l.get("local_image"),
                 "rank": ov_me.get("rank") or acc_l.get("rank"),
                 "budget": ov_me.get("budget") if "budget" in ov_me else acc_l.get("budget"),
                 "is_live": ov_l.get("is_live", False),
@@ -118,7 +127,9 @@ def _build_snapshot_payload(
     last_api_requests: int = 0
     if selected_league_id and selected_league_id in runtime.leagues:
         lset = runtime.leagues[selected_league_id]
-        sync_data = (lset.sync.data or {}) if lset.sync else {}
+        sync_data = league_snaps.get(selected_league_id) or (
+            (lset.sync.data or {}) if lset.sync else {}
+        )
         league_data = {
             MODULE_LEAGUE_OVERVIEW: sync_data.get(MODULE_LEAGUE_OVERVIEW),
             MODULE_SQUAD_LINEUP: sync_data.get(MODULE_SQUAD_LINEUP),
@@ -126,25 +137,34 @@ def _build_snapshot_payload(
             MODULE_LIVE_MATCHDAY: sync_data.get(MODULE_LIVE_MATCHDAY),
             MODULE_FEED_ACHIEVEMENTS: sync_data.get(MODULE_FEED_ACHIEVEMENTS),
         }
-        db_stats = sync_data.get("db_stats")
-        last_sync_at = sync_data.get("last_sync_at")
-        last_api_requests = int(sync_data.get("last_api_requests") or 0)
+        db_stats = await runtime.store.async_get_stats(selected_league_id)
+        last_sync_at = db_stats.get("last_sync_at") or sync_data.get("last_sync_at")
+        last_api_requests = int(
+            (db_stats.get("last_sync") or {}).get("api_requests")
+            or sync_data.get("last_api_requests")
+            or 0
+        )
+
+    db_news, _ = await runtime.store.async_get_snapshot("news_predictions")
+    db_challenges, _ = await runtime.store.async_get_snapshot("challenges")
 
     entries_meta = []
     for e in entries:
         rt: KickbaseRuntimeData = e.runtime_data
-        u = (rt.account.data or {}).get("user") or {}
+        rt_acc, _ = await rt.store.async_get_snapshot("account")
+        u = ((rt_acc if isinstance(rt_acc, dict) else rt.account.data) or {}).get("user") or {}
         entries_meta.append(
             {
                 "entry_id": e.entry_id,
                 "title": e.title,
                 "user_name": u.get("name", e.title),
-                "user_avatar": u.get("avatar"),
+                "user_avatar": u.get("local_avatar") or u.get("avatar"),
             }
         )
 
     return {
         "configured": True,
+        "from_local_db": True,
         "entries": entries_meta,
         "active_entry_id": selected_entry.entry_id,
         "user": account_data.get("user") or {},
@@ -156,8 +176,20 @@ def _build_snapshot_payload(
         "db_stats": db_stats,
         "last_sync_at": last_sync_at,
         "last_api_requests": last_api_requests,
-        MODULE_NEWS_PREDICTIONS: runtime.news_predictions.data if runtime.news_predictions else None,
-        MODULE_CHALLENGES: runtime.challenges.data if runtime.challenges else None,
+        MODULE_NEWS_PREDICTIONS: (
+            db_news
+            if isinstance(db_news, dict)
+            else (runtime.news_predictions.data if runtime.news_predictions else None)
+        )
+        if runtime.is_module_enabled(MODULE_NEWS_PREDICTIONS)
+        else None,
+        MODULE_CHALLENGES: (
+            db_challenges
+            if isinstance(db_challenges, dict)
+            else (runtime.challenges.data if runtime.challenges else None)
+        )
+        if runtime.is_module_enabled(MODULE_CHALLENGES)
+        else None,
         "event_types": account_data.get("event_types") or {},
         "competitions": account_data.get("competitions") or {},
         "market_value_timeframe": runtime.market_value_timeframe,
@@ -186,15 +218,15 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         vol.Optional("league_id"): str,
     }
 )
-@callback
-def ws_get_snapshot(
+@websocket_api.async_response
+async def ws_get_snapshot(
     hass: HomeAssistant,
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Return full modular snapshot for UI cards and sidebar panel."""
+    """Return full modular snapshot strictly from local SQLite database (0 Kickbase calls)."""
     try:
-        payload = _build_snapshot_payload(
+        payload = await _async_build_snapshot_payload(
             hass,
             entry_id=msg.get("entry_id"),
             league_id=msg.get("league_id"),
@@ -231,7 +263,7 @@ async def ws_get_player_detail(
         timeframe = int(requested_tf) if requested_tf else runtime.market_value_timeframe
         force_refresh = bool(msg.get("force_refresh", False))
 
-        # 1. Serve directly from local SQLite database unless caller forces a live refresh
+        # 1. Serve strictly from local SQLite database unless caller explicitly requests live refresh
         if not force_refresh:
             local_data = await runtime.store.async_get_player_detail(
                 league_id,
@@ -241,6 +273,12 @@ async def ws_get_player_detail(
             if local_data is not None:
                 connection.send_result(msg["id"], local_data)
                 return
+            connection.send_error(
+                msg["id"],
+                "not_in_local_db",
+                f"Spieler {player_id} ist noch nicht in der lokalen Datenbank gespeichert. Bitte Synchronisierung abwarten oder manuell starten.",
+            )
+            return
 
         # 2. On-demand API fallback (e.g. for an unowned search result not in bulk scope)
         async def _fetch() -> dict[str, Any]:
@@ -329,6 +367,12 @@ async def ws_get_manager_detail(
             if local_mgr is not None:
                 connection.send_result(msg["id"], local_mgr)
                 return
+            connection.send_error(
+                msg["id"],
+                "not_in_local_db",
+                f"Manager {manager_id} ist noch nicht in der lokalen Datenbank gespeichert.",
+            )
+            return
 
         async def _fetch() -> dict[str, Any]:
             ibp = runtime.api.client.image_base_url
@@ -455,7 +499,9 @@ async def ws_get_db_stats(
     {
         vol.Required("type"): "kickbase/get_match_detail",
         vol.Required("match_id"): str,
+        vol.Optional("league_id"): str,
         vol.Optional("entry_id"): str,
+        vol.Optional("force_refresh"): bool,
     }
 )
 @websocket_api.async_response
@@ -464,10 +510,73 @@ async def ws_get_match_detail(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Fetch match lineups, scores, and live events timeline."""
+    """Serve match lineups, scores, and events from local SQLite database."""
     try:
-        _, runtime = _resolve_runtime(hass, entry_id=msg.get("entry_id"))
-        match_id = msg["match_id"]
+        _, runtime = _resolve_runtime(
+            hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
+        )
+        match_id = str(msg["match_id"])
+        force_refresh = bool(msg.get("force_refresh", False))
+
+        if not force_refresh:
+            cached_md, updated_at = await runtime.store.async_get_snapshot(
+                f"match_detail:{match_id}"
+            )
+            if isinstance(cached_md, dict):
+                cached_md.setdefault("from_local_db", True)
+                cached_md.setdefault("db_updated_at", updated_at)
+                connection.send_result(msg["id"], cached_md)
+                return
+
+            # Fallback to match summary stored in SQLite league snapshot (0 API calls)
+            for lid in ([msg["league_id"]] if msg.get("league_id") else []) + list(
+                runtime.leagues.keys()
+            ):
+                lsnap, lupdated = await runtime.store.async_get_snapshot(f"league:{lid}")
+                if not isinstance(lsnap, dict):
+                    continue
+                live_mod = lsnap.get(MODULE_LIVE_MATCHDAY) or {}
+                candidates = list(live_mod.get("current_matches") or [])
+                for md in live_mod.get("all_matchdays") or []:
+                    candidates.extend(md.get("matches") or [])
+                found = next((m for m in candidates if str(m.get("id")) == match_id), None)
+                if found is not None:
+                    connection.send_result(
+                        msg["id"],
+                        {
+                            "from_local_db": True,
+                            "db_updated_at": lupdated,
+                            "match_id": match_id,
+                            "team1_id": found.get("team1_id"),
+                            "team2_id": found.get("team2_id"),
+                            "team1_name": found.get("team1_name"),
+                            "team2_name": found.get("team2_name"),
+                            "team1_short": found.get("team1_short"),
+                            "team2_short": found.get("team2_short"),
+                            "team1_goals": found.get("team1_goals", 0),
+                            "team2_goals": found.get("team2_goals", 0),
+                            "team1_image": found.get("team1_image"),
+                            "team2_image": found.get("team2_image"),
+                            "local_team1_image": found.get("local_team1_image"),
+                            "local_team2_image": found.get("local_team2_image"),
+                            "minute": found.get("minute"),
+                            "date": found.get("date"),
+                            "is_live": bool(found.get("is_live", False)),
+                            "team1_lineup": [],
+                            "team1_bench": [],
+                            "team2_lineup": [],
+                            "team2_bench": [],
+                            "events": [],
+                        },
+                    )
+                    return
+
+            connection.send_error(
+                msg["id"],
+                "not_in_local_db",
+                f"Spieldetails für {match_id} sind noch nicht lokal zwischengespeichert.",
+            )
+            return
 
         async def _fetch() -> dict[str, Any]:
             ibp = runtime.api.client.image_base_url
@@ -489,6 +598,7 @@ async def ws_get_match_detail(
                     }
                 )
             return {
+                "from_local_db": False,
                 "match_id": match_id,
                 "team1_id": str(raw.get("t1", "")),
                 "team2_id": str(raw.get("t2", "")),
@@ -510,7 +620,7 @@ async def ws_get_match_detail(
                 "events": events,
             }
 
-        data = await runtime.cache.get_or_fetch(f"match:{match_id}", _fetch, ttl=60)
+        data = await runtime.cache.get_or_fetch(f"match:{match_id}", _fetch, ttl=60, force=True)
         connection.send_result(msg["id"], data)
     except (ValueError, KickbaseError) as err:
         connection.send_error(msg["id"], "kickbase_error", str(err))
@@ -521,6 +631,7 @@ async def ws_get_match_detail(
         vol.Required("type"): "kickbase/get_news_item",
         vol.Required("item_id"): str,
         vol.Optional("entry_id"): str,
+        vol.Optional("force_refresh"): bool,
     }
 )
 @websocket_api.async_response
@@ -529,10 +640,55 @@ async def ws_get_news_item(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Fetch full Kickbase news article (sanitized HTML)."""
+    """Serve cached Kickbase news article (sanitized HTML) strictly from local DB."""
     try:
         _, runtime = _resolve_runtime(hass, entry_id=msg.get("entry_id"))
-        item_id = msg["item_id"]
+        item_id = str(msg["item_id"])
+        force_refresh = bool(msg.get("force_refresh", False))
+
+        if not force_refresh:
+            cached_news, updated_at = await runtime.store.async_get_snapshot(
+                f"news_item:{item_id}"
+            )
+            if isinstance(cached_news, dict):
+                cached_news.setdefault("from_local_db", True)
+                cached_news.setdefault("db_updated_at", updated_at)
+                connection.send_result(msg["id"], cached_news)
+                return
+
+            # Fallback: find cached headline/teaser inside news_predictions SQLite snapshot
+            np_snap, np_updated = await runtime.store.async_get_snapshot("news_predictions")
+            if isinstance(np_snap, dict):
+                candidates: list[dict[str, Any]] = list(np_snap.get("stage") or [])
+                for sec in np_snap.get("sections") or []:
+                    candidates.extend(sec.get("items") or [])
+                for lst in (np_snap.get("news_by_competition") or {}).values():
+                    candidates.extend(lst or [])
+                found = next((it for it in candidates if str(it.get("id")) == item_id), None)
+                if found is not None:
+                    desc = found.get("description") or ""
+                    connection.send_result(
+                        msg["id"],
+                        {
+                            "from_local_db": True,
+                            "db_updated_at": np_updated,
+                            "id": item_id,
+                            "title": found.get("title", ""),
+                            "label": found.get("label", "News"),
+                            "date": found.get("date"),
+                            "image": found.get("local_image") or found.get("image"),
+                            "local_image": found.get("local_image"),
+                            "html": f"<p>{desc}</p>" if desc else "<p>Nur Zusammenfassung in lokaler Datenbank gespeichert.</p>",
+                        },
+                    )
+                    return
+
+            connection.send_error(
+                msg["id"],
+                "not_in_local_db",
+                f"News-Artikel {item_id} ist noch nicht lokal gespeichert.",
+            )
+            return
 
         async def _fetch() -> dict[str, Any]:
             ibp = runtime.api.client.image_base_url
@@ -540,6 +696,7 @@ async def ws_get_news_item(
             html_content = raw.get("cnt", "") if isinstance(raw, dict) else ""
             safe_html = _SCRIPT_TAG_RE.sub("", html_content)
             return {
+                "from_local_db": False,
                 "id": item_id,
                 "title": raw.get("ti") if isinstance(raw, dict) else "",
                 "label": raw.get("rl") if isinstance(raw, dict) else "",
@@ -548,7 +705,7 @@ async def ws_get_news_item(
                 "html": safe_html,
             }
 
-        data = await runtime.cache.get_or_fetch(f"news:{item_id}", _fetch, ttl=3600)
+        data = await runtime.cache.get_or_fetch(f"news:{item_id}", _fetch, ttl=3600, force=True)
         connection.send_result(msg["id"], data)
     except (ValueError, KickbaseError) as err:
         connection.send_error(msg["id"], "kickbase_error", str(err))
@@ -561,6 +718,7 @@ async def ws_get_news_item(
         vol.Required("query"): str,
         vol.Optional("league_id"): str,
         vol.Optional("entry_id"): str,
+        vol.Optional("online"): bool,
     }
 )
 @websocket_api.async_response
@@ -569,11 +727,22 @@ async def ws_search_players(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Search players across a competition (checks local DB first when offline/online)."""
+    """Search players locally in SQLite (online=True only if explicitly requested)."""
     try:
         _, runtime = _resolve_runtime(
             hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
         )
+        online = bool(msg.get("online", False))
+        if not online:
+            lid = msg.get("league_id") or runtime.primary_league_id
+            players = await runtime.store.async_query_players(
+                lid,
+                query=str(msg.get("query") or ""),
+                limit=50,
+            )
+            connection.send_result(msg["id"], {"from_local_db": True, "players": players})
+            return
+
         ibp = runtime.api.client.image_base_url
         res = await runtime.api.competitions.search_players(
             msg["competition_id"],
@@ -585,7 +754,7 @@ async def ws_search_players(
             normalize_player(p, ibp)
             for p in ((res.get("it") or []) if isinstance(res, dict) else [])
         ]
-        connection.send_result(msg["id"], {"players": players})
+        connection.send_result(msg["id"], {"from_local_db": False, "players": players})
     except (ValueError, KickbaseError) as err:
         connection.send_error(msg["id"], "kickbase_error", str(err))
 
@@ -595,6 +764,7 @@ async def ws_search_players(
         vol.Required("type"): "kickbase/get_challenge_detail",
         vol.Required("challenge_id"): str,
         vol.Optional("entry_id"): str,
+        vol.Optional("force_refresh"): bool,
     }
 )
 @websocket_api.async_response
@@ -603,10 +773,47 @@ async def ws_get_challenge_detail(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Fetch detailed challenge standings, top10, and livepitch."""
+    """Serve challenge standings, top10, and livepitch strictly from local DB."""
     try:
         _, runtime = _resolve_runtime(hass, entry_id=msg.get("entry_id"))
-        cid = msg["challenge_id"]
+        cid = str(msg["challenge_id"])
+        force_refresh = bool(msg.get("force_refresh", False))
+
+        if not force_refresh:
+            cached_ch, updated_at = await runtime.store.async_get_snapshot(
+                f"challenge_detail:{cid}"
+            )
+            if isinstance(cached_ch, dict):
+                cached_ch.setdefault("from_local_db", True)
+                cached_ch.setdefault("db_updated_at", updated_at)
+                connection.send_result(msg["id"], cached_ch)
+                return
+
+            ch_snap, ch_updated = await runtime.store.async_get_snapshot("challenges")
+            if isinstance(ch_snap, dict):
+                det = (ch_snap.get("challenge_details") or {}).get(cid)
+                if isinstance(det, dict):
+                    connection.send_result(
+                        msg["id"],
+                        {
+                            "from_local_db": True,
+                            "db_updated_at": ch_updated,
+                            "id": cid,
+                            "profile": det.get("profile") or {},
+                            "table": {},
+                            "top10": {},
+                            "live_points": det.get("live_points", 0),
+                            "lineup": det.get("lineup") or [],
+                        },
+                    )
+                    return
+
+            connection.send_error(
+                msg["id"],
+                "not_in_local_db",
+                f"Challenge {cid} ist noch nicht lokal gespeichert.",
+            )
+            return
 
         async def _fetch() -> dict[str, Any]:
             ibp = runtime.api.client.image_base_url
@@ -617,6 +824,7 @@ async def ws_get_challenge_detail(
                 runtime.api.challenges.get_challenge_livepitch(cid),
             )
             return {
+                "from_local_db": False,
                 "id": cid,
                 "profile": profile,
                 "table": table,
@@ -628,7 +836,7 @@ async def ws_get_challenge_detail(
                 ],
             }
 
-        data = await runtime.cache.get_or_fetch(f"challenge:{cid}", _fetch, ttl=120)
+        data = await runtime.cache.get_or_fetch(f"challenge:{cid}", _fetch, ttl=120, force=True)
         connection.send_result(msg["id"], data)
     except (ValueError, KickbaseError) as err:
         connection.send_error(msg["id"], "kickbase_error", str(err))
@@ -649,7 +857,7 @@ async def ws_refresh(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Manually trigger consolidated sync or global module refresh and return snapshot."""
+    """Manually trigger consolidated sync or global module sync and return DB snapshot."""
     try:
         entry, runtime = _resolve_runtime(
             hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
@@ -660,18 +868,24 @@ async def ws_refresh(
         tasks = []
 
         if module == MODULE_NEWS_PREDICTIONS and runtime.news_predictions is not None:
-            tasks.append(runtime.news_predictions.async_request_refresh())
+            tasks.append(runtime.news_predictions.async_trigger_sync())
         elif module == MODULE_CHALLENGES and runtime.challenges is not None:
-            tasks.append(runtime.challenges.async_request_refresh())
-        elif target_league in runtime.leagues:
-            lset = runtime.leagues[target_league]
-            if lset.sync is not None:
-                tasks.append(lset.sync.async_trigger_sync(force_full_details=force_details))
+            tasks.append(runtime.challenges.async_trigger_sync())
+        else:
+            if target_league in runtime.leagues:
+                lset = runtime.leagues[target_league]
+                if lset.sync is not None:
+                    tasks.append(lset.sync.async_trigger_sync(force_full_details=force_details))
+            if not module:
+                if runtime.news_predictions is not None:
+                    tasks.append(runtime.news_predictions.async_trigger_sync())
+                if runtime.challenges is not None:
+                    tasks.append(runtime.challenges.async_trigger_sync())
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        payload = _build_snapshot_payload(
+        payload = await _async_build_snapshot_payload(
             hass, entry_id=entry.entry_id, league_id=target_league
         )
         connection.send_result(msg["id"], payload)

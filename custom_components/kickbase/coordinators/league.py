@@ -31,6 +31,7 @@ from ..const import (
     MODULE_MARKET_TRANSFERS,
     MODULE_SQUAD_LINEUP,
 )
+from ..storage import asset_photo_key
 from .base import KickbaseBaseCoordinator
 
 if TYPE_CHECKING:
@@ -84,6 +85,7 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
         cache_photos: bool = True,
         fetch_player_details: bool = True,
         adaptive_live_polling: bool = False,
+        event_types_map: dict[int, str] | None = None,
     ) -> None:
         self.league_id = league_id
         self.user_id = user_id
@@ -95,7 +97,9 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
         self._cache_photos = cache_photos
         self._fetch_player_details = fetch_player_details
         self._adaptive_live_polling = adaptive_live_polling
+        self._event_types_map = event_types_map or {}
         self._force_full_details = False
+        self._force_sync = False
 
         self._was_negative: bool | None = None
         self._known_scouted_on_market: set[str] | None = None
@@ -113,13 +117,36 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
 
     async def async_trigger_sync(self, *, force_full_details: bool = False) -> None:
         """Trigger an immediate consolidated sync (optionally forcing full backfill)."""
+        self._force_sync = True
         self._force_full_details = force_full_details
         try:
             await self.async_request_refresh()
         finally:
             self._force_full_details = False
+            self._force_sync = False
+
+    def _is_snapshot_fresh(self, updated_at: str | None) -> bool:
+        dt = parse_iso_datetime(updated_at)
+        if dt is None:
+            return False
+        return (datetime.now(UTC) - dt) < self._base_interval
 
     async def _async_fetch_data(self) -> dict[str, Any]:
+        # On HA restart (data is None), reuse recent local SQLite snapshot if < sync_interval
+        if self.data is None and not self._force_sync:
+            cached_snap, updated_at = await self.store.async_get_snapshot(
+                f"league:{self.league_id}"
+            )
+            if (
+                isinstance(cached_snap, dict)
+                and self._is_snapshot_fresh(updated_at)
+                and set(cached_snap.get("enabled_modules") or []) == self.enabled_modules
+            ):
+                db_stats = await self.store.async_get_stats(self.league_id)
+                cached_snap["db_stats"] = db_stats
+                cached_snap["last_sync_at"] = db_stats.get("last_sync_at") or updated_at
+                return cached_snap
+
         started_at = datetime.now(UTC).isoformat()
         start_req_count = self.api.client.request_count
         ibp = self.api.client.image_base_url
@@ -605,62 +632,7 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
         enriched_items = await asyncio.gather(*(_enrich_player(pid) for pid in all_player_ids))
 
         # ------------------------------------------------------------------
-        # Phase 5: Local photo cache (download only if missing on disk!)
-        # ------------------------------------------------------------------
-        photos_downloaded = 0
-        if self._cache_photos:
-            photo_targets: dict[str, str] = {}
-            for item in enriched_items:
-                pl = item["player"]
-                if pl.get("image"):
-                    photo_targets[f"player_{pl['id']}"] = pl["image"]
-                if pl.get("team_image") and pl.get("team_id"):
-                    photo_targets[f"team_{pl['team_id']}"] = pl["team_image"]
-            for mgr in managers_payload:
-                if mgr.get("avatar"):
-                    photo_targets[f"manager_{mgr['id']}"] = mgr["avatar"]
-
-            cached_map = await self.store.async_find_cached_photos(list(photo_targets.keys()))
-            missing_keys = [k for k in photo_targets if k not in cached_map]
-
-            photo_sem = asyncio.Semaphore(4)
-
-            async def _download_missing(pkey: str) -> tuple[str, str | None]:
-                async with photo_sem:
-                    dl = await self.api.client.async_download_bytes(photo_targets[pkey])
-                    if not dl:
-                        return pkey, None
-                    raw_bytes, ct = dl
-                    if not raw_bytes:
-                        return pkey, None
-                    local_url = await self.store.async_save_photo(
-                        pkey, raw_bytes, remote_url=photo_targets[pkey], content_type=ct
-                    )
-                    return pkey, local_url
-
-            if missing_keys:
-                dl_results = await asyncio.gather(*(_download_missing(k) for k in missing_keys))
-                for pkey, local_url in dl_results:
-                    if local_url:
-                        cached_map[pkey] = local_url
-                        photos_downloaded += 1
-
-            # Attach local_image URLs onto in-memory & persisted payloads
-            for item in enriched_items:
-                pl = item["player"]
-                if loc := cached_map.get(f"player_{pl['id']}"):
-                    pl["local_image"] = loc
-                if pl.get("team_id") and (tloc := cached_map.get(f"team_{pl['team_id']}")):
-                    pl["local_team_image"] = tloc
-            for mgr in managers_payload:
-                if alog := cached_map.get(f"manager_{mgr['id']}"):
-                    mgr["local_avatar"] = alog
-
-        # Index enriched players for returning fresh local_image into squad/lineup/market payloads
-        enriched_by_id = {item["player"]["id"]: item["player"] for item in enriched_items}
-
-        # ------------------------------------------------------------------
-        # Phase 6: Optional Live Matchday & Feed/Achievements (same hourly pass)
+        # Phase 5: Optional Live Matchday & Feed/Achievements (same hourly pass)
         # ------------------------------------------------------------------
         live_data: dict[str, Any] | None = None
         if need_live:
@@ -669,6 +641,168 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
         feed_data: dict[str, Any] | None = None
         if need_feed:
             feed_data = await self._fetch_feed_achievements_section()
+
+        # ------------------------------------------------------------------
+        # Phase 6: Unified local image cache (players, teams, managers, league, live)
+        # ------------------------------------------------------------------
+        photo_targets: dict[str, str] = {}
+
+        def _reg_img(prefix: str, item_id: str | None, url: str | None) -> str | None:
+            if not url or not isinstance(url, str):
+                return None
+            key = asset_photo_key(prefix, item_id, url)
+            photo_targets[key] = url
+            return key
+
+        for item in enriched_items:
+            pl = item["player"]
+            _reg_img("player", pl.get("id"), pl.get("image"))
+            _reg_img("team", pl.get("team_id"), pl.get("team_image"))
+            _reg_img("team", (pl.get("opponent") or {}).get("id"), (pl.get("opponent") or {}).get("image"))
+
+        for lp in lineup_players:
+            _reg_img("player", lp.get("id"), lp.get("image"))
+            _reg_img("team", lp.get("team_id"), lp.get("team_image"))
+            _reg_img("team", (lp.get("opponent") or {}).get("id"), (lp.get("opponent") or {}).get("image"))
+            if lp.get("home_team_image"):
+                _reg_img("asset", None, lp["home_team_image"])
+            if lp.get("away_team_image"):
+                _reg_img("asset", None, lp["away_team_image"])
+
+        for tid, turl in team_images.items():
+            _reg_img("team", tid, turl)
+
+        for mgr in managers_payload:
+            _reg_img("manager", mgr.get("id"), mgr.get("avatar"))
+            dash_av = (mgr.get("dashboard") or {}).get("avatar")
+            _reg_img("manager", mgr.get("id"), dash_av)
+            for tr in mgr.get("transfers") or []:
+                _reg_img("player", tr.get("player_id"), tr.get("image"))
+
+        if overview_data:
+            lg_obj = overview_data.get("league") or {}
+            _reg_img("league", lg_obj.get("id"), lg_obj.get("image"))
+            for tpc in (overview_data.get("me") or {}).get("team_player_counts") or []:
+                _reg_img("team", tpc.get("team_id"), tpc.get("image"))
+            for st in overview_data.get("standings") or []:
+                _reg_img("manager", st.get("id"), st.get("avatar"))
+            for btl in overview_data.get("battles") or []:
+                _reg_img("manager", btl.get("leader_id"), btl.get("leader_avatar"))
+
+        if live_data:
+            for row in live_data.get("competition_table") or []:
+                _reg_img("team", row.get("team_id"), row.get("image"))
+            for row in live_data.get("competition_ranking") or []:
+                _reg_img("team", row.get("team_id"), row.get("image"))
+            for u in live_data.get("teamcenter_standings") or []:
+                _reg_img("manager", u.get("id"), u.get("avatar"))
+            for pl in (live_data.get("my_eleven") or []) + (live_data.get("bench") or []):
+                _reg_img("player", pl.get("id"), pl.get("image"))
+                _reg_img("team", pl.get("team_id"), pl.get("team_image"))
+            for m in live_data.get("current_matches") or []:
+                _reg_img("team", m.get("team1_id"), m.get("team1_image"))
+                _reg_img("team", m.get("team2_id"), m.get("team2_image"))
+            for md in live_data.get("all_matchdays") or []:
+                for m in md.get("matches") or []:
+                    _reg_img("team", m.get("team1_id"), m.get("team1_image"))
+                    _reg_img("team", m.get("team2_id"), m.get("team2_image"))
+
+        cached_map, photos_downloaded = await self.store.async_cache_image_urls(
+            self.api.client, photo_targets, enabled=self._cache_photos
+        )
+
+        def _cached_url(prefix: str, item_id: str | None, url: str | None) -> str | None:
+            if not url:
+                return None
+            return cached_map.get(asset_photo_key(prefix, item_id, url))
+
+        def _localize_player(pl: dict[str, Any]) -> None:
+            if loc := _cached_url("player", pl.get("id"), pl.get("image")):
+                pl["local_image"] = loc
+            if tloc := _cached_url("team", pl.get("team_id"), pl.get("team_image")):
+                pl["local_team_image"] = tloc
+            opp = pl.get("opponent")
+            if isinstance(opp, dict) and (oloc := _cached_url("team", opp.get("id"), opp.get("image"))):
+                opp["local_image"] = oloc
+                opp["image"] = oloc
+            if hloc := _cached_url("asset", None, pl.get("home_team_image")):
+                pl["home_team_image"] = hloc
+            if aloc := _cached_url("asset", None, pl.get("away_team_image")):
+                pl["away_team_image"] = aloc
+
+        for item in enriched_items:
+            _localize_player(item["player"])
+        for lp in lineup_players:
+            _localize_player(lp)
+        for tid in list(team_images.keys()):
+            if tloc := _cached_url("team", tid, team_images[tid]):
+                team_images[tid] = tloc
+        for mgr in managers_payload:
+            if mloc := _cached_url("manager", mgr.get("id"), mgr.get("avatar")):
+                mgr["local_avatar"] = mloc
+                mgr["avatar"] = mloc
+            dash = mgr.get("dashboard")
+            if isinstance(dash, dict) and (dloc := _cached_url("manager", mgr.get("id"), dash.get("avatar"))):
+                dash["local_avatar"] = dloc
+                dash["avatar"] = dloc
+            for sp in mgr.get("squad") or []:
+                _localize_player(sp)
+            for tr in mgr.get("transfers") or []:
+                if trloc := _cached_url("player", tr.get("player_id"), tr.get("image")):
+                    tr["local_image"] = trloc
+                    tr["image"] = trloc
+
+        if overview_data:
+            lg_obj = overview_data.get("league") or {}
+            if lloc := _cached_url("league", lg_obj.get("id"), lg_obj.get("image")):
+                lg_obj["local_image"] = lloc
+                lg_obj["image"] = lloc
+            for tpc in (overview_data.get("me") or {}).get("team_player_counts") or []:
+                if tpcloc := _cached_url("team", tpc.get("team_id"), tpc.get("image")):
+                    tpc["local_image"] = tpcloc
+                    tpc["image"] = tpcloc
+            for st in overview_data.get("standings") or []:
+                if sloc := _cached_url("manager", st.get("id"), st.get("avatar")):
+                    st["local_avatar"] = sloc
+                    st["avatar"] = sloc
+            for btl in overview_data.get("battles") or []:
+                if bloc := _cached_url("manager", btl.get("leader_id"), btl.get("leader_avatar")):
+                    btl["local_leader_avatar"] = bloc
+                    btl["leader_avatar"] = bloc
+
+        if live_data:
+            for row in live_data.get("competition_table") or []:
+                if loc := _cached_url("team", row.get("team_id"), row.get("image")):
+                    row["local_image"] = loc
+                    row["image"] = loc
+            for row in live_data.get("competition_ranking") or []:
+                if loc := _cached_url("team", row.get("team_id"), row.get("image")):
+                    row["local_image"] = loc
+                    row["image"] = loc
+            for u in live_data.get("teamcenter_standings") or []:
+                if loc := _cached_url("manager", u.get("id"), u.get("avatar")):
+                    u["local_avatar"] = loc
+                    u["avatar"] = loc
+            for pl in (live_data.get("my_eleven") or []) + (live_data.get("bench") or []):
+                _localize_player(pl)
+            for m in live_data.get("current_matches") or []:
+                if l1 := _cached_url("team", m.get("team1_id"), m.get("team1_image")):
+                    m["local_team1_image"] = l1
+                    m["team1_image"] = l1
+                if l2 := _cached_url("team", m.get("team2_id"), m.get("team2_image")):
+                    m["local_team2_image"] = l2
+                    m["team2_image"] = l2
+            for md in live_data.get("all_matchdays") or []:
+                for m in md.get("matches") or []:
+                    if l1 := _cached_url("team", m.get("team1_id"), m.get("team1_image")):
+                        m["local_team1_image"] = l1
+                        m["team1_image"] = l1
+                    if l2 := _cached_url("team", m.get("team2_id"), m.get("team2_image")):
+                        m["local_team2_image"] = l2
+                        m["team2_image"] = l2
+
+        # Index enriched players for returning fresh local_image into squad/lineup/market payloads
+        enriched_by_id = {item["player"]["id"]: item["player"] for item in enriched_items}
 
         # ------------------------------------------------------------------
         # Phase 7: Atomic SQLite Persistence + HA Events
@@ -772,11 +906,14 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
             enriched_scouted = [
                 _merge_player(p, enriched_by_id.get(p["id"], {})) for p in scouted_players
             ]
+            enriched_scouted_matches = [
+                p for p in enriched_market if p.get("is_scouted")
+            ]
 
-            current_scouted_ids = {p["id"] for p in scouted_matches}
+            current_scouted_ids = {p["id"] for p in enriched_scouted_matches}
             if self._known_scouted_on_market is not None:
                 newly_listed = current_scouted_ids - self._known_scouted_on_market
-                for p in scouted_matches:
+                for p in enriched_scouted_matches:
                     if p["id"] in newly_listed:
                         self.hass.bus.async_fire(
                             EVENT_SCOUTED_ON_MARKET,
@@ -821,22 +958,90 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
                 "most_valuable_player": most_valuable,
                 "scouted": enriched_scouted,
                 "scouted_count": len(enriched_scouted),
-                "scouted_on_market": scouted_matches,
-                "scouted_on_market_count": len(scouted_matches),
+                "scouted_on_market": enriched_scouted_matches,
+                "scouted_on_market_count": len(enriched_scouted_matches),
             }
 
         db_stats = await self.store.async_get_stats(self.league_id)
 
-        return {
+        league_snapshot = {
             MODULE_LEAGUE_OVERVIEW: overview_data,
             MODULE_SQUAD_LINEUP: squad_lineup_data,
             MODULE_MARKET_TRANSFERS: market_data,
             MODULE_LIVE_MATCHDAY: live_data,
             MODULE_FEED_ACHIEVEMENTS: feed_data,
+            "enabled_modules": sorted(self.enabled_modules),
             "db_stats": db_stats,
             "last_sync_at": db_stats.get("last_sync_at") or datetime.now(UTC).isoformat(),
             "last_api_requests": total_api_requests,
         }
+
+        # Persist full league snapshot + normalized match details in SQLite cached_snapshots
+        snap_batch: dict[str, dict[str, Any]] = {
+            f"league:{self.league_id}": league_snapshot
+        }
+        if live_data and isinstance(live_data.get("live_match_details"), dict):
+            ev_map = self._event_types_map or {}
+            for mid, raw_md in live_data["live_match_details"].items():
+                if not isinstance(raw_md, dict):
+                    continue
+                t1_id = str(raw_md.get("t1", ""))
+                t2_id = str(raw_md.get("t2", ""))
+                t1_img = resolve_image_url(raw_md.get("t1im"), ibp)
+                t2_img = resolve_image_url(raw_md.get("t2im"), ibp)
+                events_norm = []
+                for ev in raw_md.get("events") or []:
+                    ke = ev.get("ke")
+                    pi = str(ev.get("pi", ""))
+                    ev_img = resolve_image_url(ev.get("pim"), ibp)
+                    events_norm.append(
+                        {
+                            "player_id": pi,
+                            "player_name": ev.get("pn"),
+                            "team_id": str(ev.get("tid", "")),
+                            "event_code": ke,
+                            "event_label": ev_map.get(int(ke), f"Event #{ke}") if isinstance(ke, int) or str(ke).isdigit() else f"Event #{ke}",
+                            "minute": ev.get("mt"),
+                            "image": _cached_url("player", pi, ev_img) or ev_img,
+                            "replaced_player": ev.get("rev"),
+                        }
+                    )
+
+                def _norm_match_players(raw_list: list[Any]) -> list[dict[str, Any]]:
+                    out = []
+                    for rp in raw_list or []:
+                        np = normalize_player(rp, ibp)
+                        _localize_player(np)
+                        out.append(np)
+                    return out
+
+                snap_batch[f"match_detail:{mid}"] = {
+                    "from_local_db": True,
+                    "match_id": str(mid),
+                    "team1_id": t1_id,
+                    "team2_id": t2_id,
+                    "team1_name": raw_md.get("t1n") or raw_md.get("t1sy") or t1_id,
+                    "team2_name": raw_md.get("t2n") or raw_md.get("t2sy") or t2_id,
+                    "team1_short": raw_md.get("t1sy"),
+                    "team2_short": raw_md.get("t2sy"),
+                    "team1_goals": raw_md.get("t1g", 0),
+                    "team2_goals": raw_md.get("t2g", 0),
+                    "team1_image": _cached_url("team", t1_id, t1_img) or t1_img,
+                    "team2_image": _cached_url("team", t2_id, t2_img) or t2_img,
+                    "local_team1_image": _cached_url("team", t1_id, t1_img),
+                    "local_team2_image": _cached_url("team", t2_id, t2_img),
+                    "minute": raw_md.get("mtd") or raw_md.get("mt"),
+                    "date": raw_md.get("md"),
+                    "is_live": bool(raw_md.get("il", False)),
+                    "team1_lineup": _norm_match_players(raw_md.get("t1lp") or []),
+                    "team1_bench": _norm_match_players(raw_md.get("t1nlp") or []),
+                    "team2_lineup": _norm_match_players(raw_md.get("t2lp") or []),
+                    "team2_bench": _norm_match_players(raw_md.get("t2nlp") or []),
+                    "events": events_norm,
+                }
+
+        await self.store.async_save_snapshots_batch(snap_batch)
+        return league_snapshot
 
     async def _fetch_live_matchday_section(
         self, ibp: str, myeleven_raw: dict[str, Any]

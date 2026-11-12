@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -15,15 +16,32 @@ from .const import STATIC_PHOTOS_URL_PATH
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+    from .api.client import KickbaseHttpClient
 
 _LOGGER = logging.getLogger(__name__)
 
 _SAFE_ID_RE = re.compile(r"[^a-zA-Z0-9_-]")
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".svg")
+_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+}
 
 
 def _safe_key(val: str) -> str:
     return _SAFE_ID_RE.sub("_", str(val or "unknown"))
+
+
+def asset_photo_key(prefix: str, item_id: str | None, remote_url: str | None = None) -> str:
+    """Build deterministic cache key for non-player assets (league/news/team/user/banner)."""
+    clean_id = str(item_id or "").strip()
+    if clean_id:
+        return f"{prefix}_{_safe_key(clean_id)}"
+    digest = hashlib.sha1(str(remote_url or "").encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}_{digest}"
 
 
 def _guess_extension(url: str | None, content_type: str | None) -> str:
@@ -202,6 +220,12 @@ class KickbaseLocalStore:
                 status TEXT NOT NULL DEFAULT 'ok',
                 error TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS cached_snapshots (
+                cache_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         conn.commit()
@@ -274,6 +298,75 @@ class KickbaseLocalStore:
         return await self._hass.async_add_executor_job(
             self._save_photo_sync, photo_key, raw_bytes, remote_url, content_type
         )
+
+    def _read_photo_bytes_sync(self, photo_key: str) -> tuple[bytes, str] | None:
+        safe = _safe_key(photo_key)
+        for ext in _IMAGE_EXTS:
+            candidate = self.photos_dir / f"{safe}{ext}"
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate.read_bytes(), _CONTENT_TYPES.get(ext, "image/png")
+        return None
+
+    async def async_read_photo_bytes(
+        self, photo_key: str
+    ) -> tuple[bytes, str] | None:
+        """Read cached image bytes + content-type directly from disk (0 HTTP calls)."""
+        return await self._hass.async_add_executor_job(
+            self._read_photo_bytes_sync, photo_key
+        )
+
+    async def async_cache_image_urls(
+        self,
+        api_client: KickbaseHttpClient,
+        urls_by_key: dict[str, str],
+        *,
+        enabled: bool = True,
+        concurrency: int = 4,
+    ) -> tuple[dict[str, str], int]:
+        """Cache missing remote URLs on disk and return `{key: /api/kickbase_photos/...}`."""
+        clean_urls = {
+            k: v
+            for k, v in urls_by_key.items()
+            if k and v and isinstance(v, str) and not v.startswith("/")
+        }
+        # Preserve already-local URLs directly in result
+        cached_map = await self.async_find_cached_photos(list(clean_urls.keys()))
+        for k, v in urls_by_key.items():
+            if isinstance(v, str) and v.startswith("/"):
+                cached_map[k] = v
+
+        if not enabled:
+            return cached_map, 0
+
+        missing_keys = [k for k in clean_urls if k not in cached_map]
+        if not missing_keys:
+            return cached_map, 0
+
+        import asyncio
+
+        sem = asyncio.Semaphore(max(1, concurrency))
+
+        async def _dl_one(pkey: str) -> tuple[str, str | None]:
+            url = clean_urls[pkey]
+            async with sem:
+                dl = await api_client.async_download_bytes(url)
+                if not dl:
+                    return pkey, None
+                raw_bytes, ct = dl
+                if not raw_bytes:
+                    return pkey, None
+                local_url = await self.async_save_photo(
+                    pkey, raw_bytes, remote_url=url, content_type=ct
+                )
+                return pkey, local_url
+
+        results = await asyncio.gather(*(_dl_one(k) for k in missing_keys))
+        downloaded = 0
+        for pkey, local_url in results:
+            if local_url:
+                cached_map[pkey] = local_url
+                downloaded += 1
+        return cached_map, downloaded
 
     # ------------------------------------------------------------------
     # Sync metadata & bulk transactional persistence
@@ -1002,3 +1095,69 @@ class KickbaseLocalStore:
     async def async_get_stats(self, league_id: str | None = None) -> dict[str, Any]:
         """Return database and photo cache metrics."""
         return await self._hass.async_add_executor_job(self._get_stats_sync, league_id)
+
+    # ------------------------------------------------------------------
+    # Full module & detail snapshot persistence (strict DB-only GUI reads)
+    # ------------------------------------------------------------------
+    def _save_snapshots_batch_sync(self, items: dict[str, dict[str, Any]]) -> None:
+        if not items:
+            return
+        conn = self._ensure_conn()
+        now_iso = datetime.now(UTC).isoformat()
+        with self._lock:
+            cur = conn.cursor()
+            try:
+                cur.execute("BEGIN")
+                for key, payload in items.items():
+                    cur.execute(
+                        """
+                        INSERT INTO cached_snapshots (cache_key, payload_json, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(cache_key) DO UPDATE SET
+                            payload_json = excluded.payload_json,
+                            updated_at = excluded.updated_at
+                        """,
+                        (str(key), json.dumps(payload), now_iso),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    async def async_save_snapshot(
+        self, cache_key: str, payload: dict[str, Any]
+    ) -> None:
+        """Persist a normalized JSON snapshot in SQLite."""
+        await self.async_save_snapshots_batch({cache_key: payload})
+
+    async def async_save_snapshots_batch(
+        self, items: dict[str, dict[str, Any]]
+    ) -> None:
+        """Atomically persist multiple JSON snapshots in SQLite."""
+        await self._hass.async_add_executor_job(
+            self._save_snapshots_batch_sync, items
+        )
+
+    def _get_snapshot_sync(
+        self, cache_key: str
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        conn = self._ensure_conn()
+        with self._lock:
+            row = conn.execute(
+                "SELECT payload_json, updated_at FROM cached_snapshots WHERE cache_key = ?",
+                (str(cache_key),),
+            ).fetchone()
+            if row is None:
+                return None, None
+            try:
+                return json.loads(row["payload_json"]), row["updated_at"]
+            except ValueError:
+                return None, None
+
+    async def async_get_snapshot(
+        self, cache_key: str
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Load cached JSON snapshot and timestamp from SQLite."""
+        return await self._hass.async_add_executor_job(
+            self._get_snapshot_sync, cache_key
+        )

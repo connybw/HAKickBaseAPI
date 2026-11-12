@@ -13,6 +13,7 @@ import {
   formatSecondsCountdown,
   formatSignedCompactEur,
   kickbaseStore,
+  localImg,
   openKickbaseModal,
   playerImg,
   positionClass,
@@ -206,21 +207,9 @@ class KickbaseBaseCard extends HTMLElement {
   }
 
   _bindRefreshButton() {
-    this.shadowRoot.querySelector("[data-refresh]")?.addEventListener("click", async () => {
+    this.shadowRoot.querySelector("[data-refresh]")?.addEventListener("click", () => {
       if (!this._hass) return;
-      this._loading = true;
-      this._render();
-      try {
-        this._snapshot = await kickbaseStore.refresh(this._hass, {
-          leagueId: this._activeLeagueId(),
-        });
-        this._lastFetch = Date.now();
-      } catch (err) {
-        this._error = err?.message || String(err);
-      } finally {
-        this._loading = false;
-        this._render();
-      }
+      this._loadSnapshot(true);
     });
   }
 
@@ -238,7 +227,7 @@ class KickbaseBaseCard extends HTMLElement {
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             ${pillHtml}
-            <button class="kb-btn" data-refresh title="Aktualisieren">${this._loading ? "⏳" : "↻"}</button>
+            <button class="kb-btn" data-refresh title="Aus lokaler Datenbank neu laden">${this._loading ? "⏳" : "↻"}</button>
           </div>
         </div>
         ${
@@ -610,17 +599,20 @@ class KickbaseStandingsCard extends KickbaseBaseCard {
                 battles.length
                   ? battles
                       .map(
-                        (b) => `
+                        (b) => {
+                          const bImg = localImg(b, "local_leader_avatar", "leader_avatar");
+                          return `
                         <div class="kb-row clickable" data-manager-id="${escapeHtml(b.leader_id)}">
                           <div class="kb-row-left">
-                            ${b.leader_avatar ? `<img class="kb-avatar round" src="${escapeHtml(b.leader_avatar)}"/>` : ""}
+                            ${bImg ? `<img class="kb-avatar round" src="${escapeHtml(bImg)}" loading="lazy"/>` : ""}
                             <div class="kb-row-main">
                               <div class="kb-row-name">🏆 ${escapeHtml(b.name)}</div>
                               <div class="kb-row-meta">${escapeHtml(b.description || "")}</div>
                             </div>
                           </div>
                           <div class="kb-row-val">${escapeHtml(b.leader_name || "–")}</div>
-                        </div>`
+                        </div>`;
+                        }
                       )
                       .join("")
                   : `<div class="kb-empty">Keine Battles aktiv</div>`
@@ -708,18 +700,22 @@ class KickbaseLiveCard extends KickbaseBaseCard {
                 matches.length
                   ? matches
                       .map(
-                        (m) => `
+                        (m) => {
+                          const t1Img = localImg(m, "local_team1_image", "team1_image");
+                          const t2Img = localImg(m, "local_team2_image", "team2_image");
+                          return `
                         <div class="kb-row clickable ${m.is_live ? "highlight" : ""}" data-match-id="${escapeHtml(m.id)}">
                           <div class="kb-row-left">
-                            ${m.team1_image ? `<img class="kb-crest" src="${escapeHtml(m.team1_image)}"/>` : ""}
+                            ${t1Img ? `<img class="kb-crest" src="${escapeHtml(t1Img)}" loading="lazy"/>` : ""}
                             <div class="kb-row-main">
                               <div class="kb-row-name">${escapeHtml(m.team1_name)} vs. ${escapeHtml(m.team2_name)}</div>
                               <div class="kb-row-meta">${m.is_live ? `🔴 LIVE ${escapeHtml(m.minute)}'` : formatDateTime(m.date)} · ${escapeHtml(m.status)}</div>
                             </div>
-                            ${m.team2_image ? `<img class="kb-crest" src="${escapeHtml(m.team2_image)}"/>` : ""}
+                            ${t2Img ? `<img class="kb-crest" src="${escapeHtml(t2Img)}" loading="lazy"/>` : ""}
                           </div>
                           <div class="kb-row-val" style="font-size:16px">${m.status === "scheduled" ? "– : –" : `${m.team1_goals ?? 0} : ${m.team2_goals ?? 0}`}</div>
-                        </div>`
+                        </div>`;
+                        }
                       )
                       .join("")
                   : `<div class="kb-empty">Keine Partien für diesen Spieltag</div>`
@@ -730,11 +726,13 @@ class KickbaseLiveCard extends KickbaseBaseCard {
               ${table
                 .slice(0, 18)
                 .map(
-                  (t) => `
+                  (t) => {
+                    const cImg = localImg(t, "local_image", "image");
+                    return `
                   <div class="kb-row">
                     <div class="kb-row-left">
                       <span class="kb-pill" style="min-width:30px;justify-content:center">${t.rank}</span>
-                      ${t.image ? `<img class="kb-crest" src="${escapeHtml(t.image)}"/>` : ""}
+                      ${cImg ? `<img class="kb-crest" src="${escapeHtml(cImg)}" loading="lazy"/>` : ""}
                       <div class="kb-row-main">
                         <div class="kb-row-name">${escapeHtml(t.team_name)}</div>
                         <div class="kb-row-meta">${t.matches_played} Sp · Diff ${t.goal_diff >= 0 ? "+" : ""}${t.goal_diff} · KB ST: ${t.kickbase_matchday_points}</div>
@@ -742,23 +740,27 @@ class KickbaseLiveCard extends KickbaseBaseCard {
                     </div>
                     <div class="kb-row-val">${t.points} Pkt</div>
                   </div>
-                `
+                `;
+                  }
                 )
                 .join("")}
             </div>`
           : `<div class="kb-list">
               ${(live.teamcenter_standings || [])
                 .map(
-                  (u) => `
+                  (u) => {
+                    const uImg = avatarImg(u);
+                    return `
                   <div class="kb-row ${u.is_me ? "highlight" : ""}">
                     <div class="kb-row-left">
                       <span class="kb-pill">#${u.rank}</span>
-                      ${u.avatar ? `<img class="kb-avatar round" src="${escapeHtml(u.avatar)}"/>` : ""}
+                      ${uImg ? `<img class="kb-avatar round" src="${escapeHtml(uImg)}" loading="lazy"/>` : ""}
                       <div class="kb-row-name">${escapeHtml(u.name)}</div>
                     </div>
                     <div class="kb-row-val">${u.matchday_points} Pkt</div>
                   </div>
-                `
+                `;
+                  }
                 )
                 .join("") || `<div class="kb-empty">Keine Spieltags-Rangliste verfügbar</div>`}
             </div>`
@@ -784,6 +786,7 @@ class KickbaseLiveCard extends KickbaseBaseCard {
       el.addEventListener("click", () => {
         openKickbaseModal(this.shadowRoot, this._hass, "match", {
           matchId: el.dataset.matchId,
+          leagueId: this._activeLeagueId(),
         });
       })
     );
@@ -830,17 +833,20 @@ class KickbaseFeedNewsCard extends KickbaseBaseCard {
           ? `<div class="kb-list">
               ${newsList
                 .map(
-                  (n) => `
+                  (n) => {
+                    const nImg = localImg(n, "local_image", "image");
+                    return `
                   <div class="kb-row clickable" data-news-id="${escapeHtml(n.id)}">
                     <div class="kb-row-left">
-                      ${n.image ? `<img class="kb-avatar" src="${escapeHtml(n.image)}" loading="lazy"/>` : ""}
+                      ${nImg ? `<img class="kb-avatar" src="${escapeHtml(nImg)}" loading="lazy"/>` : ""}
                       <div class="kb-row-main">
                         <div class="kb-row-name">${escapeHtml(n.title)}</div>
                         <div class="kb-row-meta"><span class="kb-pill accent" style="padding:1px 6px;font-size:10px">${escapeHtml(n.label || "News")}</span><span>${formatDateTime(n.date)}</span></div>
                       </div>
                     </div>
                   </div>
-                `
+                `;
+                  }
                 )
                 .join("") || `<div class="kb-empty">Keine News verfügbar</div>`}
             </div>`
@@ -848,13 +854,17 @@ class KickbaseFeedNewsCard extends KickbaseBaseCard {
           ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px">
               ${predictions
                 .map(
-                  (tm) => `
+                  (tm) => {
+                    const tmCrest = localImg(tm, "local_team_image", "team_image");
+                    const predImg = localImg(tm, "local_prediction_image", "prediction_image");
+                    return `
                   <div class="kb-kpi" style="text-align:center">
-                    ${tm.team_image ? `<img class="kb-crest" style="width:32px;height:32px" src="${escapeHtml(tm.team_image)}"/>` : ""}
+                    ${tmCrest ? `<img class="kb-crest" style="width:32px;height:32px" src="${escapeHtml(tmCrest)}" loading="lazy"/>` : ""}
                     <div class="kb-row-name" style="margin-top:6px">${escapeHtml(tm.team_name)}</div>
-                    ${tm.prediction_image ? `<img src="${escapeHtml(tm.prediction_image)}" style="width:100%;border-radius:8px;margin-top:6px" loading="lazy"/>` : ""}
+                    ${predImg ? `<img src="${escapeHtml(predImg)}" style="width:100%;border-radius:8px;margin-top:6px" loading="lazy"/>` : ""}
                   </div>
-                `
+                `;
+                  }
                 )
                 .join("") || `<div class="kb-empty">Keine Aufstellungsprognosen verfügbar</div>`}
             </div>`
@@ -942,10 +952,11 @@ class KickbaseChallengesCard extends KickbaseBaseCard {
             ? list
                 .map((c) => {
                   const det = (ch.challenge_details || {})[c.id];
+                  const cImg = localImg(c, "local_image", "image");
                   return `
                     <div class="kb-row ${c.is_live ? "highlight" : ""}">
                       <div class="kb-row-left">
-                        ${c.image ? `<img class="kb-avatar" src="${escapeHtml(c.image)}" loading="lazy"/>` : ""}
+                        ${cImg ? `<img class="kb-avatar" src="${escapeHtml(cImg)}" loading="lazy"/>` : ""}
                         <div class="kb-row-main">
                           <div class="kb-row-name">${escapeHtml(c.name)}</div>
                           <div class="kb-row-meta">

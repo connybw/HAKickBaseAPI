@@ -439,6 +439,10 @@ export function sanitizeHtml(rawHtml) {
       if (name.startsWith("on") || ((name === "href" || name === "src") && val.startsWith("javascript:"))) {
         el.removeAttribute(attr.name);
       }
+      if (el.tagName === "IMG" && name === "src" && !isLocalUrl(attr.value)) {
+        el.remove();
+        return;
+      }
     }
   });
   return doc.body.innerHTML;
@@ -522,16 +526,29 @@ export function positionClass(posCode) {
   }
 }
 
+export function isLocalUrl(url) {
+  return typeof url === "string" && (url.startsWith("/") || url.startsWith("data:"));
+}
+
+export function localImg(obj, ...keys) {
+  if (!obj) return null;
+  for (const k of keys) {
+    const val = obj[k];
+    if (isLocalUrl(val)) return val;
+  }
+  return null;
+}
+
 export function playerImg(p) {
-  return p?.local_image || p?.image || null;
+  return localImg(p, "local_image", "image");
 }
 
 export function teamImg(p) {
-  return p?.local_team_image || p?.team_image || null;
+  return localImg(p, "local_team_image", "team_image");
 }
 
 export function avatarImg(m) {
-  return m?.local_avatar || m?.avatar || null;
+  return localImg(m, "local_avatar", "avatar");
 }
 
 export function renderMarketValueChartSvg(series, width = 620, height = 170) {
@@ -731,7 +748,6 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
         type: "kickbase/get_player_detail",
         league_id: params.leagueId,
         player_id: params.playerId,
-        ...(params.forceRefresh ? { force_refresh: true } : {}),
       });
       const p = data.player || {};
       const mv = data.market_value || {};
@@ -742,6 +758,7 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
       const statusHistory = (data.status_history || []).slice(0, 20);
       const pImg = playerImg(p);
       const tImg = teamImg(p);
+      const dbStand = data.db_updated_at || p.db_updated_at;
 
       modal.innerHTML = `
         <div class="kb-modal-head">
@@ -753,14 +770,13 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
               <div class="kb-subtitle">
                 ${escapeHtml(p.team_name || "")} · ${escapeHtml(p.position?.name_de || "")} ·
                 <span class="kb-pill ${escapeHtml(p.status?.severity || "ok")}">${escapeHtml(p.status?.label_de || "Fit")}</span>
-                <span class="kb-pill ${data.from_local_db ? "ok" : "accent"}" style="margin-left:4px">${data.from_local_db ? "💾 Lokal gespeichert" : "🌐 Live API"}</span>
+                <span class="kb-pill ok" style="margin-left:4px">💾 Lokale DB${dbStand ? ` · ${formatDateTime(dbStand)}` : ""}</span>
               </div>
               ${p.owner_name ? `<div class="kb-subtitle" style="margin-top:2px">Besitzer: ${escapeHtml(p.owner_name)}${p.is_on_market ? ` · Auf Transfermarkt (${formatCompactEur(p.price || p.market_value)})` : ""}</div>` : ""}
               ${p.status_text ? `<div class="kb-subtitle kb-warn-txt" style="margin-top:4px">${escapeHtml(p.status_text)}</div>` : ""}
             </div>
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0">
-            <button class="kb-btn" data-live-reload title="Einzeln live von Kickbase nachladen">↻ Live</button>
             <button class="kb-btn" data-close>Schließen</button>
           </div>
         </div>
@@ -888,7 +904,7 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
               <div class="kb-title" style="font-size:20px">${escapeHtml(d.name)}</div>
               <div class="kb-subtitle">
                 Platz #${d.rank ?? "–"} · ${d.matchday_wins ?? 0} Spieltagssiege ·
-                <span class="kb-pill ${data.from_local_db ? "ok" : "accent"}">${data.from_local_db ? "💾 Lokal gespeichert" : "🌐 Live API"}</span>
+                <span class="kb-pill ok">💾 Lokale DB${data.db_updated_at ? ` · ${formatDateTime(data.db_updated_at)}` : ""}</span>
               </div>
             </div>
           </div>
@@ -954,12 +970,22 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
       const m = await hass.callWS({
         type: "kickbase/get_match_detail",
         match_id: params.matchId,
+        ...(params.leagueId ? { league_id: params.leagueId } : {}),
       });
+      const mT1Img = localImg(m, "local_team1_image", "team1_image");
+      const mT2Img = localImg(m, "local_team2_image", "team2_image");
       modal.innerHTML = `
         <div class="kb-modal-head">
-          <div>
-            <div class="kb-title" style="font-size:19px">${escapeHtml(m.team1_name)} ${m.team1_goals ?? 0} : ${m.team2_goals ?? 0} ${escapeHtml(m.team2_name)}</div>
-            <div class="kb-subtitle">${m.is_live ? `LIVE ${escapeHtml(m.minute)}'` : formatDateTime(m.date)}</div>
+          <div class="kb-row-left">
+            ${mT1Img ? `<img class="kb-crest" style="width:28px;height:28px" src="${escapeHtml(mT1Img)}"/>` : ""}
+            <div>
+              <div class="kb-title" style="font-size:19px">${escapeHtml(m.team1_name)} ${m.team1_goals ?? 0} : ${m.team2_goals ?? 0} ${escapeHtml(m.team2_name)}</div>
+              <div class="kb-subtitle">
+                ${m.is_live ? `LIVE ${escapeHtml(m.minute)}'` : formatDateTime(m.date)} ·
+                <span class="kb-pill ok">💾 Lokale DB</span>
+              </div>
+            </div>
+            ${mT2Img ? `<img class="kb-crest" style="width:28px;height:28px" src="${escapeHtml(mT2Img)}"/>` : ""}
           </div>
           <button class="kb-btn" data-close>Schließen</button>
         </div>
@@ -1011,16 +1037,20 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
         type: "kickbase/get_news_item",
         item_id: params.itemId,
       });
+      const nImg = localImg(item, "local_image", "image");
       modal.innerHTML = `
         <div class="kb-modal-head">
           <div>
-            <div class="kb-pill accent" style="margin-bottom:6px">${escapeHtml(item.label || "News")}</div>
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+              <span class="kb-pill accent">${escapeHtml(item.label || "News")}</span>
+              <span class="kb-pill ok">💾 Lokale DB</span>
+            </div>
             <div class="kb-title" style="font-size:19px">${escapeHtml(item.title)}</div>
             <div class="kb-subtitle">${formatDateTime(item.date)}</div>
           </div>
           <button class="kb-btn" data-close>Schließen</button>
         </div>
-        ${item.image ? `<img src="${escapeHtml(item.image)}" style="width:100%;max-height:240px;object-fit:cover;border-radius:12px;margin-bottom:12px"/>` : ""}
+        ${nImg ? `<img src="${escapeHtml(nImg)}" style="width:100%;max-height:240px;object-fit:cover;border-radius:12px;margin-bottom:12px"/>` : ""}
         <div class="kb-news-html">${sanitizeHtml(item.html) || "<p>Kein Inhalt.</p>"}</div>
       `;
     }
@@ -1035,10 +1065,6 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
   }
 
   modal.querySelector("[data-close]")?.addEventListener("click", () => backdrop.remove());
-  modal.querySelector("[data-live-reload]")?.addEventListener("click", () => {
-    backdrop.remove();
-    openKickbaseModal(shadowRoot, hass, "player", { ...params, forceRefresh: true });
-  });
   modal.querySelectorAll("[data-modal-player-id]").forEach((el) => {
     el.addEventListener("click", () => {
       backdrop.remove();

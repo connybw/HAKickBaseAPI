@@ -6,6 +6,7 @@
 
 import {
   KICKBASE_CSS,
+  avatarImg,
   escapeHtml,
   formatCompactEur,
   formatDateTime,
@@ -50,7 +51,6 @@ class KickbasePanel extends HTMLElement {
     this._loading = false;
     this._searchQuery = "";
     this._searchResults = [];
-    this._searchOnlineMode = false;
     this._searchTimer = null;
     this._hiddenCards = this._loadHiddenCards();
 
@@ -281,11 +281,11 @@ class KickbasePanel extends HTMLElement {
           <div class="kb-topbar-left">
             <button class="kb-btn" id="kb-menu-btn" title="Home Assistant Menü">☰</button>
             <div class="kb-badge-icon">KB</div>
-            ${user.avatar ? `<img class="kb-avatar round" src="${escapeHtml(user.avatar)}"/>` : ""}
+            ${avatarImg(user) ? `<img class="kb-avatar round" src="${escapeHtml(avatarImg(user))}"/>` : ""}
             <div>
               <div class="kb-title" style="font-size:18px">Kickbase Command Center</div>
               <div class="kb-subtitle">
-                ${escapeHtml(user.name || "Manager")} ${user.has_pro ? "· ⭐ Pro" : ""} · Rein lesend
+                ${escapeHtml(user.name || "Manager")} ${user.has_pro ? "· ⭐ Pro" : ""} · Nur lokale DB-Werte
                 ${dbStats ? ` · 💾 ${dbStats.players_count ?? 0} Spieler · 📸 ${dbStats.photos_cached ?? 0} Fotos · Sync ${formatDateTime(snap?.last_sync_at)}` : ""}
               </div>
             </div>
@@ -312,7 +312,7 @@ class KickbasePanel extends HTMLElement {
               <div id="kb-search-dropdown-slot"></div>
             </div>
             <button class="kb-btn ${this._customizeOpen ? "active" : ""}" id="kb-customize-btn">⚙ Module</button>
-            <button class="kb-btn" id="kb-panel-refresh" title="Stündlichen Liga-Sync sofort ausführen">${this._loading ? "⏳ Sync läuft..." : "↻ Sync"}</button>
+            <button class="kb-btn" id="kb-panel-refresh" title="Ansicht aus lokaler Datenbank neu laden (0 API-Calls)">${this._loading ? "⏳ Lädt..." : "↻ DB laden"}</button>
           </div>
         </div>
 
@@ -404,8 +404,8 @@ class KickbasePanel extends HTMLElement {
             </div>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
-            <button class="kb-btn" id="kb-db-sync-now" ${this._loading ? "disabled" : ""}>${this._loading ? "⏳ Sync..." : "↻ Jetzt synchronisieren"}</button>
-            <button class="kb-btn" id="kb-db-sync-full" ${this._loading ? "disabled" : ""} title="Erzwingt kompletten Historien-Download für alle Spieler">📊 Komplette Historie laden</button>
+            <button class="kb-btn" id="kb-db-sync-now" ${this._loading ? "disabled" : ""} title="Manuellen Abruf vom Kickbase-Server außerhalb des 1h-Intervalls starten">${this._loading ? "⏳ Server-Sync..." : "🌐 Server-Sync jetzt"}</button>
+            <button class="kb-btn" id="kb-db-sync-full" ${this._loading ? "disabled" : ""} title="Erzwingt kompletten Historien-Download vom Server für alle Spieler">📊 Komplette Historie laden</button>
           </div>
         </div>
 
@@ -558,16 +558,14 @@ class KickbasePanel extends HTMLElement {
     if (!this._searchResults.length && q.length >= 2) {
       slot.innerHTML = `
         <div class="kb-search-dropdown">
-          <div class="kb-empty" style="padding:10px">Kein Treffer in der lokalen DB.</div>
-          <button class="kb-btn" style="width:100%;justify-content:center;margin-top:6px" id="kb-search-online-btn">🌐 Online in Bundesliga suchen</button>
+          <div class="kb-empty" style="padding:10px">Kein Treffer in der lokalen Datenbank.</div>
         </div>
       `;
     } else {
       slot.innerHTML = `
         <div class="kb-search-dropdown">
           <div style="font-size:10px;color:var(--kb-muted);padding:2px 6px 6px;display:flex;justify-content:space-between">
-            <span>${this._searchOnlineMode ? "🌐 Live Bundesliga-Suche" : "💾 Lokale Datenbank (0 API-Calls)"}</span>
-            ${!this._searchOnlineMode ? `<a href="#" id="kb-search-online-btn" style="color:var(--kb-accent)">Online erweitern</a>` : ""}
+            <span>💾 Lokale Datenbank (0 API-Calls)</span>
           </div>
           <div class="kb-list">
             ${this._searchResults
@@ -589,24 +587,6 @@ class KickbasePanel extends HTMLElement {
         </div>
       `;
     }
-
-    slot.querySelector("#kb-search-online-btn")?.addEventListener("click", async (e) => {
-      e.preventDefault();
-      if (!this._hass || q.length < 2) return;
-      try {
-        const res = await this._hass.callWS({
-          type: "kickbase/search_players",
-          competition_id: activeLeague?.competition_id || "1",
-          league_id: activeLeague?.id,
-          query: q,
-        });
-        this._searchOnlineMode = true;
-        this._searchResults = res?.players || [];
-        this._renderSearchDropdown(activeLeague);
-      } catch {
-        // ignore transient search errors
-      }
-    });
 
     slot.querySelectorAll("[data-search-player-id]").forEach((row) => {
       row.addEventListener("click", () => {
@@ -638,7 +618,7 @@ class KickbasePanel extends HTMLElement {
     });
 
     this.shadowRoot.getElementById("kb-panel-refresh")?.addEventListener("click", () => {
-      this._triggerSync(this._selectedLeagueId || activeLeague?.id, false);
+      this._loadSnapshot(true);
     });
 
     this.shadowRoot.querySelectorAll("[data-toggle-card]").forEach((btn) => {
@@ -662,7 +642,6 @@ class KickbasePanel extends HTMLElement {
     if (searchInput) {
       searchInput.addEventListener("input", (e) => {
         this._searchQuery = e.target.value;
-        this._searchOnlineMode = false;
         clearTimeout(this._searchTimer);
         const q = this._searchQuery.trim();
         if (q.length < 2) {

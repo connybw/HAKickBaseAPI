@@ -343,8 +343,20 @@ def _seed_mock_kickbase_session(
         session.add_route("GET", f"/v4/leagues/2001/players/{pid}/transfers", FakeResponse(200, {"it": []}))
         session.add_route("GET", f"/v4/leagues/2001/players/{pid}/transferHistory", FakeResponse(200, {"it": [{"unm": "Chris", "trp": mv - 2000000}]}))
 
-    # Photo binary CDN routes
-    for path in ("/p/4577.png", "/p/111.png", "/p/555.png", "/p/777.png", "/p/888.png", "/team/fcb.png", "/user/100.png", "/user/101.png"):
+    # Photo binary CDN routes (players, teams, users, league, competition, predictions)
+    for path in (
+        "/p/4577.png",
+        "/p/111.png",
+        "/p/555.png",
+        "/p/777.png",
+        "/p/888.png",
+        "/team/fcb.png",
+        "/user/100.png",
+        "/user/101.png",
+        "/league/2001.png",
+        "/comp/1.png",
+        "/pred/fcb.png",
+    ):
         session.add_route("GET", path, FakeResponse(200, bytes_data=b"\x89PNGFAKE", headers={"Content-Type": "image/png"}))
 
     # Live Matchday
@@ -570,7 +582,7 @@ class TestKickbaseIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db_stats["market_count"], 2)
         self.assertEqual(db_stats["rival_players_count"], 1)
         self.assertGreater(db_stats["photos_cached"], 0)
-        self.assertEqual(db_stats["last_sync"]["photos_downloaded"], db_stats["photos_cached"])
+        self.assertGreaterEqual(db_stats["photos_cached"], db_stats["last_sync"]["photos_downloaded"])
 
         # 2nd sync MUST NOT re-download photos OR re-fetch already-synced MV history (<12h)
         req_before_2nd_sync = len(session.requests)
@@ -650,9 +662,12 @@ class TestKickbaseIntegration(unittest.IsolatedAsyncioTestCase):
         imgs: list[Any] = []
         await img_setup(hass, entry, imgs.extend)
         self.assertEqual(len(imgs), 2)
-        self.assertEqual(imgs[0].image_url, "https://kickbase.b-cdn.net/user/100.png")
+        self.assertEqual(imgs[0].image_url, "/api/kickbase_photos/user_100.png")
+        self.assertEqual(await imgs[0].async_image(), b"\x89PNGFAKE")
+        self.assertEqual(imgs[1].image_url, "/api/kickbase_photos/league_2001.png")
+        self.assertEqual(await imgs[1].async_image(), b"\x89PNGFAKE")
 
-        # Verify WebSocket commands serve player & manager details with ZERO API calls!
+        # Verify ALL WebSocket reads (snapshot, player, manager, match, news, search, challenge, DB) execute with ZERO Kickbase API calls!
         class MockConn:
             def __init__(self) -> None:
                 self.results: dict[int, Any] = {}
@@ -665,11 +680,18 @@ class TestKickbaseIntegration(unittest.IsolatedAsyncioTestCase):
                 self.errors[msg_id] = (code, message)
 
         conn = MockConn()
-        ws_get_snapshot(hass, conn, {"id": 1, "type": "kickbase/get_snapshot"})
-        self.assertTrue(conn.results[1]["configured"])
-        self.assertEqual(conn.results[1]["db_stats"]["players_count"], 5)
-
         req_before_ws_reads = len(session.requests)
+
+        await ws_get_snapshot(hass, conn, {"id": 1, "type": "kickbase/get_snapshot"})
+        self.assertTrue(conn.results[1]["configured"])
+        self.assertTrue(conn.results[1]["from_local_db"])
+        self.assertEqual(conn.results[1]["db_stats"]["players_count"], 5)
+        self.assertEqual(conn.results[1]["user"]["local_avatar"], "/api/kickbase_photos/user_100.png")
+        self.assertEqual(
+            conn.results[1]["news_predictions"]["predictions_by_competition"]["1"][0]["prediction_image"],
+            "/api/kickbase_photos/pred_1_2.png",
+        )
+
         await ws_get_player_detail(hass, conn, {"id": 2, "type": "kickbase/get_player_detail", "league_id": "2001", "player_id": "4577"})
         self.assertTrue(conn.results[2]["from_local_db"])
         self.assertEqual(conn.results[2]["player"]["local_image"], "/api/kickbase_photos/player_4577.png")
@@ -686,8 +708,21 @@ class TestKickbaseIntegration(unittest.IsolatedAsyncioTestCase):
         await ws_get_db_stats(hass, conn, {"id": 10, "type": "kickbase/get_db_stats", "league_id": "2001"})
         self.assertEqual(conn.results[10]["players_count"], 5)
 
-        # Confirm ZERO Kickbase HTTP requests happened during all those local reads!
-        self.assertEqual(len(session.requests), req_before_ws_reads)
+        await ws_get_match_detail(hass, conn, {"id": 4, "type": "kickbase/get_match_detail", "match_id": "9901"})
+        self.assertTrue(conn.results[4]["from_local_db"])
+        self.assertEqual(conn.results[4]["team1_name"], "FC Bayern")
+
+        await ws_get_news_item(hass, conn, {"id": 5, "type": "kickbase/get_news_item", "item_id": "n1"})
+        self.assertTrue(conn.results[5]["from_local_db"])
+        self.assertNotIn("<script>", conn.results[5]["html"])
+
+        await ws_search_players(hass, conn, {"id": 6, "type": "kickbase/search_players", "competition_id": "1", "query": "Kane"})
+        self.assertTrue(conn.results[6]["from_local_db"])
+        self.assertEqual(conn.results[6]["players"][0]["name"], "Kane")
+
+        await ws_get_challenge_detail(hass, conn, {"id": 7, "type": "kickbase/get_challenge_detail", "challenge_id": "ch1"})
+        self.assertTrue(conn.results[7]["from_local_db"])
+        self.assertEqual(conn.results[7]["live_points"], 760)
 
         # Verify local services (get_player_history & query_local_players)
         hist_res = await hass.services.services[("kickbase", "get_player_history")](
@@ -699,23 +734,29 @@ class TestKickbaseIntegration(unittest.IsolatedAsyncioTestCase):
             ServiceCall({"scope": "market", "query": "Wirtz"})
         )
         self.assertEqual(query_res["count"], 1)
+
+        # Confirm ZERO Kickbase HTTP requests happened across ALL GUI/WebSocket/Image/Service reads!
         self.assertEqual(len(session.requests), req_before_ws_reads)
 
-        # Verify on-demand match, news, search, challenge & refresh WebSockets
-        await ws_get_match_detail(hass, conn, {"id": 4, "type": "kickbase/get_match_detail", "match_id": "9901"})
-        self.assertEqual(conn.results[4]["team1_name"], "FC Bayern")
-
-        await ws_get_news_item(hass, conn, {"id": 5, "type": "kickbase/get_news_item", "item_id": "n1"})
-        self.assertNotIn("<script>", conn.results[5]["html"])
-
-        await ws_search_players(hass, conn, {"id": 6, "type": "kickbase/search_players", "competition_id": "1", "query": "Kane"})
-        self.assertEqual(conn.results[6]["players"][0]["name"], "Kane")
-
-        await ws_get_challenge_detail(hass, conn, {"id": 7, "type": "kickbase/get_challenge_detail", "challenge_id": "ch1"})
-        self.assertEqual(conn.results[7]["live_points"], 760)
-
+        # Verify explicit manual server refresh works when called
         await ws_refresh(hass, conn, {"id": 8, "type": "kickbase/refresh", "league_id": "2001"})
         self.assertTrue(conn.results[8]["configured"])
+
+        self.assertTrue(await async_unload_entry(hass, entry))
+
+        # Simulate Home Assistant RESTART with an EMPTY mock session (no routes -> any HTTP call would fail):
+        # Fresh SQLite snapshots (< 3600s) MUST serve everything with ZERO Kickbase HTTP requests!
+        empty_restart_session = FakeClientSession()
+        hass._test_session = empty_restart_session
+        self.assertTrue(await async_setup_entry(hass, entry))
+        self.assertEqual(len(empty_restart_session.requests), 0)
+
+        conn_restart = MockConn()
+        await ws_get_snapshot(hass, conn_restart, {"id": 11, "type": "kickbase/get_snapshot"})
+        self.assertEqual(conn_restart.results[11]["db_stats"]["players_count"], 5)
+        await ws_get_player_detail(hass, conn_restart, {"id": 12, "type": "kickbase/get_player_detail", "league_id": "2001", "player_id": "4577"})
+        self.assertEqual(conn_restart.results[12]["player"]["local_image"], "/api/kickbase_photos/player_4577.png")
+        self.assertEqual(len(empty_restart_session.requests), 0)
 
         self.assertTrue(await async_unload_entry(hass, entry))
 

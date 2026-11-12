@@ -174,11 +174,11 @@ def _async_ensure_services(hass: HomeAssistant) -> None:
                     if target_league and lid != target_league:
                         continue
                     if lset.sync is not None:
-                        tasks.append(lset.sync.async_request_refresh())
+                        tasks.append(lset.sync.async_trigger_sync())
             if (not target_module or target_module == MODULE_NEWS_PREDICTIONS) and rt.news_predictions:
-                tasks.append(rt.news_predictions.async_request_refresh())
+                tasks.append(rt.news_predictions.async_trigger_sync())
             if (not target_module or target_module == MODULE_CHALLENGES) and rt.challenges:
-                tasks.append(rt.challenges.async_request_refresh())
+                tasks.append(rt.challenges.async_trigger_sync())
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -317,13 +317,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: KickbaseConfigEntry) -> 
     try:
         # 1. Global AccountCoordinator (handles initial login, competitions, event types & league discovery)
         account_coord = AccountCoordinator(
-            hass, entry, api, update_seconds=int(intervals.get("account", sync_seconds))
+            hass,
+            entry,
+            api,
+            update_seconds=int(intervals.get("account", sync_seconds)),
+            store=store,
+            cache_photos=cache_photos,
         )
         await account_coord.async_config_entry_first_refresh()
 
         account_data = account_coord.data or {}
         user_id = str((account_data.get("user") or {}).get("id") or "")
         discovered_leagues = account_data.get("leagues") or {}
+        event_types_map = account_data.get("event_types") or {}
 
         configured_leagues = list(options.get(CONF_LEAGUES) or [])
         if not configured_leagues:
@@ -376,6 +382,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: KickbaseConfigEntry) -> 
                 cache_photos=cache_photos,
                 fetch_player_details=fetch_player_details,
                 adaptive_live_polling=adaptive_live_polling,
+                event_types_map=event_types_map,
             )
             first_refresh_tasks.append(lset.sync.async_config_entry_first_refresh())
             runtime.leagues[lid] = lset
@@ -388,6 +395,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: KickbaseConfigEntry) -> 
                 api,
                 competition_ids or [DEFAULT_COMPETITION_ID],
                 update_seconds=int(intervals.get(MODULE_NEWS_PREDICTIONS, sync_seconds)),
+                store=store,
+                cache_photos=cache_photos,
             )
             first_refresh_tasks.append(runtime.news_predictions.async_config_entry_first_refresh())
 
@@ -397,6 +406,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: KickbaseConfigEntry) -> 
                 entry,
                 api,
                 update_seconds=int(intervals.get(MODULE_CHALLENGES, sync_seconds)),
+                store=store,
+                cache_photos=cache_photos,
             )
             first_refresh_tasks.append(runtime.challenges.async_config_entry_first_refresh())
 
