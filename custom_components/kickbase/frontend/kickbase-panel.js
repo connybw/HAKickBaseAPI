@@ -15,6 +15,7 @@ import {
   openKickbaseModal,
   playerImg,
   positionClass,
+  startingProbBadge,
   teamImg,
 } from "./kickbase-shared.js?v=1.0.0";
 import "./kickbase-cards.js?v=1.0.0";
@@ -25,6 +26,7 @@ const PANEL_MODULES = [
   { id: "squad", label: "Kader & Marktwerte", tag: "kickbase-squad-card", requires: "squad_lineup" },
   { id: "market", label: "Transfermarkt & Scout", tag: "kickbase-market-card", requires: "market_transfers" },
   { id: "standings", label: "Tabelle & Battles", tag: "kickbase-standings-card", requires: "league_overview" },
+  { id: "manager", label: "Mitspieler-Kader", tag: "kickbase-manager-card", requires: "league_overview" },
   { id: "live", label: "Live-Spieltag", tag: "kickbase-live-card", requires: "live_matchday" },
   { id: "feed", label: "Feed, News & Prognosen", tag: "kickbase-feed-news-card", requiresAny: ["feed_achievements", "news_predictions"] },
   { id: "challenges", label: "Challenges", tag: "kickbase-challenges-card", requires: "challenges" },
@@ -503,6 +505,7 @@ class KickbasePanel extends HTMLElement {
                             <div class="kb-row-meta">
                               <span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span>
                               <span class="kb-pill ${escapeHtml(p.status?.severity || "ok")}" style="padding:1px 6px;font-size:10px">${escapeHtml(p.status?.label_de || "Fit")}</span>
+                              ${startingProbBadge(p)}
                               ${scopeBadges}
                               <span>Besitzer: ${escapeHtml(p.owner_name || "Kickbase")}</span>
                               <span>· Ø ${p.average_points ?? 0}</span>
@@ -793,7 +796,7 @@ class KickbasePanel extends HTMLElement {
                     ${playerImg(p) ? `<img class="kb-avatar" src="${escapeHtml(playerImg(p))}"/>` : ""}
                     <div class="kb-row-main">
                       <div class="kb-row-name">${escapeHtml(p.full_name || p.name)}</div>
-                      <div class="kb-row-meta"><span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span> · ${escapeHtml(p.owner_name || "Kickbase")}</div>
+                      <div class="kb-row-meta"><span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span> ${startingProbBadge(p)} · ${escapeHtml(p.owner_name || "Kickbase")}</div>
                     </div>
                   </div>
                   <div class="kb-row-val">${formatCompactEur(p.market_value)}</div>

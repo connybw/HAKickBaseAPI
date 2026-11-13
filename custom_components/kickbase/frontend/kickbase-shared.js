@@ -484,15 +484,16 @@ export function formatSignedCompactEur(val) {
   return `${prefix}${formatCompactEur(num)}`;
 }
 
-export function formatSecondsCountdown(sec) {
+export function formatSecondsCountdown(sec, withSeconds = false) {
   if (sec === null || sec === undefined) return "–";
   const s = Math.max(0, Math.floor(Number(sec)));
   const d = Math.floor(s / 86400);
   const h = Math.floor((s % 86400) / 3600);
   const m = Math.floor((s % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
+  const remS = s % 60;
+  if (d > 0) return withSeconds ? `${d}d ${h}h ${m}m` : `${d}d ${h}h`;
+  if (h > 0) return withSeconds ? `${h}h ${m}m ${String(remS).padStart(2, "0")}s` : `${h}h ${m}m`;
+  return withSeconds ? `${m}m ${String(remS).padStart(2, "0")}s` : `${m}m`;
 }
 
 export function formatDateTime(iso) {
@@ -507,13 +508,19 @@ export function formatDateTime(iso) {
   });
 }
 
-export function formatIsoCountdown(iso) {
+export function formatIsoCountdown(iso, withSeconds = false) {
   if (!iso) return "–";
   const target = new Date(iso).getTime();
   if (Number.isNaN(target)) return "–";
   const diffSec = Math.floor((target - Date.now()) / 1000);
-  if (diffSec <= 0) return "Abgelaufen / Live";
-  return formatSecondsCountdown(diffSec);
+  if (diffSec <= 0) return "Abgelaufen";
+  return formatSecondsCountdown(diffSec, withSeconds);
+}
+
+export function startingProbBadge(p) {
+  const sp = p?.starting_prob;
+  if (!sp || !sp.short) return "";
+  return `<span class="kb-pill ${escapeHtml(sp.severity || "muted")}" style="padding:1px 6px;font-size:10px" title="Startelf-Wahrscheinlichkeit: ${escapeHtml(sp.label_de || sp.short)}">S11 ${escapeHtml(sp.short)}</span>`;
 }
 
 export function positionClass(posCode) {
@@ -765,6 +772,13 @@ class KickbaseStore {
     if (leagueId) msg.league_id = leagueId;
     return hass.callWS(msg);
   }
+
+  async getManagerDetail(hass, { entryId, leagueId, managerId } = {}) {
+    const msg = { type: "kickbase/get_manager_detail", manager_id: String(managerId) };
+    if (entryId) msg.entry_id = entryId;
+    if (leagueId) msg.league_id = leagueId;
+    return hass.callWS(msg);
+  }
 }
 
 export const kickbaseStore = new KickbaseStore();
@@ -813,6 +827,7 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
               <div class="kb-subtitle">
                 ${escapeHtml(p.team_name || "")} · ${escapeHtml(p.position?.name_de || "")} ·
                 <span class="kb-pill ${escapeHtml(p.status?.severity || "ok")}">${escapeHtml(p.status?.label_de || "Fit")}</span>
+                ${startingProbBadge(p)}
                 <span class="kb-pill ok" style="margin-left:4px">💾 Lokale DB${dbStand ? ` · ${formatDateTime(dbStand)}` : ""}</span>
               </div>
               ${p.owner_name ? `<div class="kb-subtitle" style="margin-top:2px">Besitzer: ${escapeHtml(p.owner_name)}${p.is_on_market ? ` · Auf Transfermarkt (${formatCompactEur(p.price || p.market_value)})` : ""}</div>` : ""}

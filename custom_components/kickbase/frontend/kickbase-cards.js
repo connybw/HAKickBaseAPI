@@ -18,6 +18,7 @@ import {
   playerImg,
   positionClass,
   renderPitchHtml,
+  startingProbBadge,
   teamImg,
 } from "./kickbase-shared.js?v=1.0.0";
 
@@ -31,24 +32,37 @@ class KickbaseCardEditor extends HTMLElement {
     this._config = {};
     this._hass = null;
     this._leagues = [];
+    this._managers = [];
+    this._loadedLeagueId = null;
   }
 
   set hass(hass) {
     this._hass = hass;
-    if (!this._leagues.length && hass) {
-      kickbaseStore
-        .getSnapshot(hass)
-        .then((snap) => {
-          this._leagues = snap?.leagues || [];
-          this._render();
-        })
-        .catch(() => {});
+    if (hass && (!this._leagues.length || this._loadedLeagueId !== (this._config.league_id || ""))) {
+      this._loadEditorData();
     }
   }
 
   setConfig(config) {
     this._config = { ...(config || {}) };
+    if (this._hass && this._loadedLeagueId !== (this._config.league_id || "")) {
+      this._loadEditorData();
+    }
     this._render();
+  }
+
+  _loadEditorData() {
+    if (!this._hass) return;
+    const lid = this._config.league_id || "";
+    this._loadedLeagueId = lid;
+    kickbaseStore
+      .getSnapshot(this._hass, { leagueId: lid || undefined })
+      .then((snap) => {
+        this._leagues = snap?.leagues || [];
+        this._managers = snap?.league_data?.league_overview?.standings || [];
+        this._render();
+      })
+      .catch(() => {});
   }
 
   _emit(next) {
@@ -89,6 +103,24 @@ class KickbaseCardEditor extends HTMLElement {
           Liga auswählen
           <select id="ed-league">${leagueOpts}</select>
         </label>
+        ${
+          cfg.type === "custom:kickbase-manager-card"
+            ? `<label>
+                Mitspieler / Manager auswählen
+                <select id="ed-manager">
+                  <option value="">Automatisch (erster Mitspieler)</option>
+                  ${this._managers
+                    .map(
+                      (m) =>
+                        `<option value="${escapeHtml(m.id)}" ${
+                          String(cfg.manager_id || "") === String(m.id) ? "selected" : ""
+                        }>#${m.rank ?? "?"} ${escapeHtml(m.name)} (${formatCompactEur(m.team_value)})</option>`
+                    )
+                    .join("")}
+                </select>
+              </label>`
+            : ""
+        }
         <label>
           Eigener Kartentitel (optional)
           <input id="ed-title" type="text" value="${escapeHtml(cfg.title || "")}" placeholder="Automatisch"/>
@@ -108,6 +140,13 @@ class KickbaseCardEditor extends HTMLElement {
       const next = { ...this._config };
       if (e.target.value) next.league_id = e.target.value;
       else delete next.league_id;
+      this._emit(next);
+      this._loadEditorData();
+    });
+    this.shadowRoot.getElementById("ed-manager")?.addEventListener("change", (e) => {
+      const next = { ...this._config };
+      if (e.target.value) next.manager_id = e.target.value;
+      else delete next.manager_id;
       this._emit(next);
     });
     this.shadowRoot.getElementById("ed-title")?.addEventListener("input", (e) => {
@@ -444,6 +483,7 @@ class KickbaseSquadCard extends KickbaseBaseCard {
                           <div class="kb-row-meta">
                             <span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span>
                             <span class="kb-pill ${escapeHtml(p.status?.severity || "ok")}" style="padding:1px 6px;font-size:10px">${escapeHtml(p.status?.label_de)}</span>
+                            ${startingProbBadge(p)}
                             <span>Ø ${p.average_points ?? 0} · ${p.total_points ?? 0} Pkt</span>
                           </div>
                         </div>
@@ -501,9 +541,33 @@ class KickbaseMarketCard extends KickbaseBaseCard {
   constructor() {
     super();
     this._tab = "market";
-    this._sort = "price";
+    this._sort = "expiry";
+    this._timer = null;
   }
   getCardSize() { return 6; }
+
+  connectedCallback() {
+    if (!this._timer) {
+      this._timer = setInterval(() => this._tickCountdowns(), 1000);
+    }
+  }
+
+  disconnectedCallback() {
+    if (this._timer) {
+      clearInterval(this._timer);
+      this._timer = null;
+    }
+  }
+
+  _tickCountdowns() {
+    if (!this.shadowRoot) return;
+    this.shadowRoot.querySelectorAll("[data-countdown-iso]").forEach((el) => {
+      const iso = el.dataset.countdownIso;
+      if (iso) {
+        el.textContent = `⏱ ${formatIsoCountdown(iso, true)}`;
+      }
+    });
+  }
 
   _render() {
     const mk = this._snapshot?.league_data?.market_transfers;
@@ -517,6 +581,12 @@ class KickbaseMarketCard extends KickbaseBaseCard {
 
     let items = [...(this._tab === "scouted" ? (mk.scouted || []) : (mk.market || []))];
     items.sort((a, b) => {
+      if (this._sort === "expiry") {
+        const ea = a.expiry_at ? Date.parse(a.expiry_at) : (a.expiry_seconds !== undefined && a.expiry_seconds !== null ? Date.now() + Number(a.expiry_seconds) * 1000 : Number.MAX_SAFE_INTEGER);
+        const eb = b.expiry_at ? Date.parse(b.expiry_at) : (b.expiry_seconds !== undefined && b.expiry_seconds !== null ? Date.now() + Number(b.expiry_seconds) * 1000 : Number.MAX_SAFE_INTEGER);
+        if (ea !== eb) return ea - eb;
+        return (b.market_value || 0) - (a.market_value || 0);
+      }
       if (this._sort === "pos") {
         const pa = Number(a.position_code || (a.position && a.position.code) || 9);
         const pb = Number(b.position_code || (b.position && b.position.code) || 9);
@@ -533,6 +603,7 @@ class KickbaseMarketCard extends KickbaseBaseCard {
         <button class="kb-btn ${this._tab === "market" ? "active" : ""}" data-tab="market">Transfermarkt (${mk.market_count ?? 0})</button>
         <button class="kb-btn ${this._tab === "scouted" ? "active" : ""}" data-tab="scouted">Scout-Liste (${mk.scouted_count ?? 0})</button>
         <span style="flex:1"></span>
+        <button class="kb-btn ${this._sort === "expiry" ? "active" : ""}" data-sort="expiry">Ablauf</button>
         <button class="kb-btn ${this._sort === "pos" ? "active" : ""}" data-sort="pos">Position</button>
         <button class="kb-btn ${this._sort === "price" ? "active" : ""}" data-sort="price">Preis</button>
         <button class="kb-btn ${this._sort === "trend" ? "active" : ""}" data-sort="trend">Trend</button>
@@ -543,6 +614,11 @@ class KickbaseMarketCard extends KickbaseBaseCard {
             ? list
                 .map((p) => {
                   const trend = Number(p.market_value_24h_change || 0);
+                  const countdownHtml = p.expiry_at
+                    ? `<span data-countdown-iso="${escapeHtml(p.expiry_at)}">⏱ ${formatIsoCountdown(p.expiry_at, true)}</span>`
+                    : (p.expiry_seconds !== undefined && p.expiry_seconds !== null
+                        ? `<span>⏱ ${formatSecondsCountdown(p.expiry_seconds, true)}</span>`
+                        : "");
                   return `
                     <div class="kb-row clickable ${p.is_scouted ? "highlight" : ""}" data-player-id="${escapeHtml(p.id)}">
                       <div class="kb-row-left">
@@ -553,7 +629,8 @@ class KickbaseMarketCard extends KickbaseBaseCard {
                           <div class="kb-row-meta">
                             <span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span>
                             <span>${escapeHtml(p.owner_name || "Kickbase")}</span>
-                            ${p.expiry_seconds !== undefined && p.expiry_seconds !== null ? `<span>⏱ ${formatSecondsCountdown(p.expiry_seconds)}</span>` : ""}
+                            ${countdownHtml}
+                            ${startingProbBadge(p)}
                             <span>Ø ${p.average_points ?? 0}</span>
                           </div>
                         </div>
@@ -1034,6 +1111,269 @@ class KickbaseChallengesCard extends KickbaseBaseCard {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* 9. kickbase-manager-card (Mitspieler Kader & Aufstellung)                  */
+/* -------------------------------------------------------------------------- */
+class KickbaseManagerCard extends KickbaseBaseCard {
+  constructor() {
+    super();
+    this._selectedManagerId = null;
+    this._tab = "lineup";
+    this._posFilter = "all";
+    this._sort = "pos";
+    this._detail = null;
+    this._detailManagerId = null;
+    this._detailLeagueId = null;
+    this._detailLoading = false;
+  }
+
+  getCardSize() { return 7; }
+
+  setConfig(config) {
+    super.setConfig(config);
+    if (config?.manager_id) {
+      this._selectedManagerId = String(config.manager_id);
+      this._detail = null;
+      this._detailManagerId = null;
+    }
+  }
+
+  async _ensureDetail(managerId) {
+    const lid = this._activeLeagueId();
+    if (!this._hass || !lid || !managerId) return;
+    if (this._detailLoading) return;
+    if (this._detail && this._detailManagerId === String(managerId) && this._detailLeagueId === String(lid)) {
+      return;
+    }
+    this._detailLoading = true;
+    try {
+      const res = await kickbaseStore.getManagerDetail(this._hass, {
+        leagueId: lid,
+        managerId: String(managerId),
+      });
+      this._detail = res;
+      this._detailManagerId = String(managerId);
+      this._detailLeagueId = String(lid);
+    } catch (_err) {
+      this._detail = null;
+    } finally {
+      this._detailLoading = false;
+      this._render();
+    }
+  }
+
+  _render() {
+    const ov = this._snapshot?.league_data?.league_overview;
+    if (!this._snapshot?.configured || !ov) {
+      return this._renderShell(
+        "Mitspieler Kader & Aufstellung",
+        "Manager-Inspektor",
+        `<div class="kb-empty">Modul „Liga & Budget“ nicht aktiv.</div>`
+      );
+    }
+
+    const standings = ov.standings || [];
+    if (!standings.length) {
+      return this._renderShell("Mitspieler Kader & Aufstellung", "Manager-Inspektor", `<div class="kb-empty">Keine Manager in der Liga gefunden.</div>`);
+    }
+
+    const chosenId = String(this._selectedManagerId || this._config.manager_id || standings[0].id);
+    const mgrSummary = standings.find((m) => String(m.id) === chosenId) || standings[0];
+    const activeId = String(mgrSummary.id);
+
+    if (!this._detail || this._detailManagerId !== activeId || this._detailLeagueId !== String(this._activeLeagueId())) {
+      this._ensureDetail(activeId);
+    }
+
+    const dash = this._detail?.dashboard || mgrSummary;
+    const squad = [...(this._detail?.squad || [])];
+    const lineupIds = new Set((this._detail?.lineup_ids || mgrSummary.lineup_ids || []).map((x) => String(x)));
+    const lineupPlayers = squad.filter((p) => lineupIds.has(String(p.id)));
+    const transfers = this._detail?.transfers || [];
+
+    const posCounts = { all: squad.length, 1: 0, 2: 0, 3: 0, 4: 0 };
+    for (const p of squad) {
+      const code = Number(p.position_code || p.position?.code || 0);
+      if (posCounts[code] !== undefined) posCounts[code] += 1;
+    }
+
+    let filteredSquad = squad.filter((p) => {
+      if (this._posFilter === "all") return true;
+      return String(p.position_code || p.position?.code || "") === String(this._posFilter);
+    });
+    filteredSquad.sort((a, b) => {
+      if (this._sort === "pos") {
+        const pa = Number(a.position_code || a.position?.code || 9);
+        const pb = Number(b.position_code || b.position?.code || 9);
+        return pa !== pb ? pa - pb : (b.market_value || 0) - (a.market_value || 0);
+      }
+      if (this._sort === "ap") return (b.average_points || 0) - (a.average_points || 0);
+      return (b.market_value || 0) - (a.market_value || 0);
+    });
+
+    const mgrOpts = standings
+      .map(
+        (m) =>
+          `<option value="${escapeHtml(m.id)}" ${String(m.id) === activeId ? "selected" : ""}>#${m.rank ?? "?"} ${escapeHtml(m.name)}</option>`
+      )
+      .join("");
+
+    const body = `
+      <div class="kb-tabs" style="align-items:center;margin-bottom:10px">
+        <select id="kb-mgr-select" class="kb-select" style="max-width:230px">${mgrOpts}</select>
+        <span style="flex:1"></span>
+        <button class="kb-btn ${this._tab === "lineup" ? "active" : ""}" data-tab="lineup">Aufstellung (${lineupPlayers.length})</button>
+        <button class="kb-btn ${this._tab === "squad" ? "active" : ""}" data-tab="squad">Kader (${squad.length})</button>
+        <button class="kb-btn ${this._tab === "transfers" ? "active" : ""}" data-tab="transfers">Transfers (${transfers.length})</button>
+      </div>
+
+      <div class="kb-kpi-grid" style="margin-bottom:12px">
+        <div class="kb-kpi">
+          <div class="kb-kpi-label">Rang / Punkte</div>
+          <div class="kb-kpi-val">#${dash.rank ?? "–"} · ${dash.total_points ?? 0}</div>
+          <div class="kb-kpi-sub">Ø ${dash.average_points ?? 0} Pkt</div>
+        </div>
+        <div class="kb-kpi">
+          <div class="kb-kpi-label">Teamwert</div>
+          <div class="kb-kpi-val">${formatCompactEur(dash.team_value ?? mgrSummary.team_value)}</div>
+          <div class="kb-kpi-sub">${squad.length} Spieler</div>
+        </div>
+        <div class="kb-kpi">
+          <div class="kb-kpi-label">Spieltag-Siege</div>
+          <div class="kb-kpi-val">${dash.matchday_wins ?? 0}</div>
+          <div class="kb-kpi-sub">${this._detail?.from_local_db ? "💾 Lokale DB" : "Live"}</div>
+        </div>
+      </div>
+
+      ${
+        this._detailLoading && !this._detail
+          ? `<div class="kb-empty">Lade Mitspieler-Daten aus lokaler DB…</div>`
+          : this._tab === "lineup"
+          ? lineupPlayers.length
+            ? renderPitchHtml(lineupPlayers)
+            : `<div class="kb-empty">Keine Aufstellungsdaten für ${escapeHtml(mgrSummary.name)} vorhanden.</div>`
+          : this._tab === "squad"
+          ? `
+            <div class="kb-tabs" style="margin-bottom:8px">
+              <button class="kb-btn ${this._posFilter === "all" ? "active" : ""}" data-pos="all">Alle (${posCounts.all})</button>
+              <button class="kb-btn ${this._posFilter === "1" ? "active" : ""}" data-pos="1">TW (${posCounts[1]})</button>
+              <button class="kb-btn ${this._posFilter === "2" ? "active" : ""}" data-pos="2">ABW (${posCounts[2]})</button>
+              <button class="kb-btn ${this._posFilter === "3" ? "active" : ""}" data-pos="3">MF (${posCounts[3]})</button>
+              <button class="kb-btn ${this._posFilter === "4" ? "active" : ""}" data-pos="4">ST (${posCounts[4]})</button>
+              <span style="flex:1"></span>
+              <button class="kb-btn ${this._sort === "pos" ? "active" : ""}" data-sort="pos">Position</button>
+              <button class="kb-btn ${this._sort === "mv" ? "active" : ""}" data-sort="mv">Marktwert</button>
+              <button class="kb-btn ${this._sort === "ap" ? "active" : ""}" data-sort="ap">Ø Pkt</button>
+            </div>
+            <div class="kb-list">
+              ${
+                filteredSquad.length
+                  ? filteredSquad
+                      .map((p) => {
+                        const inStart = lineupIds.has(String(p.id));
+                        return `
+                          <div class="kb-row clickable ${inStart ? "highlight" : ""}" data-player-id="${escapeHtml(p.id)}">
+                            <div class="kb-row-left">
+                              ${playerImg(p) ? `<img class="kb-avatar" src="${escapeHtml(playerImg(p))}" loading="lazy"/>` : ""}
+                              ${teamImg(p) ? `<img class="kb-crest" src="${escapeHtml(teamImg(p))}" loading="lazy"/>` : ""}
+                              <div class="kb-row-main">
+                                <div class="kb-row-name">${inStart ? "⭐ " : ""}${escapeHtml(p.full_name || p.name)}</div>
+                                <div class="kb-row-meta">
+                                  <span class="kb-pos-tag ${positionClass(p.position_code)}">${escapeHtml(p.position?.short)}</span>
+                                  <span class="kb-pill ${escapeHtml(p.status?.severity || "ok")}" style="padding:1px 6px;font-size:10px">${escapeHtml(p.status?.label_de || "Fit")}</span>
+                                  ${startingProbBadge(p)}
+                                  <span>Ø ${p.average_points ?? 0}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <div class="kb-row-right">
+                              <div class="kb-row-val">${formatCompactEur(p.market_value)}</div>
+                              <div class="kb-row-sub">${p.total_points ?? 0} Pkt</div>
+                            </div>
+                          </div>
+                        `;
+                      })
+                      .join("")
+                  : `<div class="kb-empty">Keine Spieler im Filter</div>`
+              }
+            </div>`
+          : `<div class="kb-list">
+              ${
+                transfers.length
+                  ? transfers
+                      .slice(0, Number(this._config.limit || 20))
+                      .map(
+                        (t) => `
+                        <div class="kb-row clickable" data-player-id="${escapeHtml(t.player_id)}">
+                          <div class="kb-row-left">
+                            <span class="kb-pill ${t.type === "buy" ? "warn" : "ok"}">${t.type === "buy" ? "Kauf" : "Verkauf"}</span>
+                            <div class="kb-row-main">
+                              <div class="kb-row-name">${escapeHtml(t.player_name || t.player_id)}</div>
+                              <div class="kb-row-meta">${formatDateTime(t.date)}</div>
+                            </div>
+                          </div>
+                          <div class="kb-row-right">
+                            <div class="kb-row-val">${formatCompactEur(t.price)}</div>
+                          </div>
+                        </div>
+                      `
+                      )
+                      .join("")
+                  : `<div class="kb-empty">Keine Transfers gespeichert</div>`
+              }
+            </div>`
+      }
+    `;
+
+    const mgrAvatar = avatarImg(mgrSummary);
+    const pill = mgrAvatar
+      ? `<img class="kb-avatar" style="width:26px;height:26px" src="${escapeHtml(mgrAvatar)}"/>`
+      : `<span class="kb-pill accent">#${dash.rank ?? "–"}</span>`;
+
+    this._renderShell(
+      `${mgrSummary.name} · Kader & Aufstellung`,
+      `Mitspieler-Inspektor`,
+      body,
+      pill
+    );
+  }
+
+  _afterRender() {
+    this.shadowRoot.getElementById("kb-mgr-select")?.addEventListener("change", (e) => {
+      this._selectedManagerId = e.target.value;
+      this._detail = null;
+      this._detailManagerId = null;
+      this._render();
+    });
+    this.shadowRoot.querySelectorAll("[data-tab]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._tab = btn.dataset.tab;
+        this._render();
+      })
+    );
+    this.shadowRoot.querySelectorAll("[data-pos]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._posFilter = btn.dataset.pos;
+        this._render();
+      })
+    );
+    this.shadowRoot.querySelectorAll("[data-sort]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._sort = btn.dataset.sort;
+        this._render();
+      })
+    );
+    this.shadowRoot.querySelectorAll("[data-player-id]").forEach((el) =>
+      el.addEventListener("click", () => {
+        openKickbaseModal(this.shadowRoot, this._hass, "player", {
+          leagueId: this._activeLeagueId(),
+          playerId: el.dataset.playerId,
+        });
+      })
+    );
+  }
+}
+
 const CARD_DEFS = [
   ["kickbase-overview-card", KickbaseOverviewCard, "Kickbase: Liga & Budget", "Modulare KPI-Karte für Budget, Teamwert, Rang & Deadline."],
   ["kickbase-lineup-card", KickbaseLineupCard, "Kickbase: Spielfeld-Aufstellung", "Interaktives Spielfeld mit Formation, Status-Badges & Spielerdetails."],
@@ -1043,6 +1383,7 @@ const CARD_DEFS = [
   ["kickbase-live-card", KickbaseLiveCard, "Kickbase: Live-Spieltag & Bundesliga", "Live-Spiele, Events, Spieltag-Ranking & Bundesliga-Tabelle."],
   ["kickbase-feed-news-card", KickbaseFeedNewsCard, "Kickbase: Feed, Erfolge & News", "Liga-Aktivitäten, Erfolge, Artikel & voraussichtliche Aufstellungen."],
   ["kickbase-challenges-card", KickbaseChallengesCard, "Kickbase: Challenges & Lobby", "Division, Skill Points & aktive Matchday-Challenges."],
+  ["kickbase-manager-card", KickbaseManagerCard, "Kickbase: Mitspieler Kader & Aufstellung", "Wählbarer Mitspieler-Kader, Aufstellung auf dem Spielfeld & Transfers."],
 ];
 
 window.customCards = window.customCards || [];

@@ -370,6 +370,15 @@ async def ws_get_manager_detail(
         if not force_refresh:
             local_mgr = await runtime.store.async_get_manager_detail(league_id, manager_id)
             if local_mgr is not None:
+                snap, _ = await runtime.store.async_get_snapshot(f"league:{league_id}")
+                lineup_ids: list[str] = []
+                if isinstance(snap, dict):
+                    standings = (snap.get(MODULE_LEAGUE_OVERVIEW) or {}).get("standings") or []
+                    for st in standings:
+                        if str(st.get("id")) == manager_id:
+                            lineup_ids = [str(pid) for pid in (st.get("lineup_ids") or [])]
+                            break
+                local_mgr["lineup_ids"] = lineup_ids
                 connection.send_result(msg["id"], local_mgr)
                 return
             connection.send_error(

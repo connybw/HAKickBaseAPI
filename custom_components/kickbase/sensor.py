@@ -519,11 +519,12 @@ async def async_setup_entry(
                 if p.get("id"):
                     all_known_players.setdefault(p["id"], p)
 
-            # Query SQLite DB for any previously synced players
+            # Query SQLite DB for any previously synced players & complete MV history
             db_players = await runtime.store.async_get_all_database_players(lid)
             for p in db_players:
                 if p.get("id"):
                     all_known_players.setdefault(p["id"], p)
+            mv_histories = await runtime.store.async_get_all_market_value_histories(lid)
 
             for pid, player in all_known_players.items():
                 p_name = player.get("full_name") or player.get("name") or pid
@@ -535,6 +536,7 @@ async def async_setup_entry(
                         player_id=pid,
                         initial_name=p_name,
                         initial_player=player,
+                        initial_mv_history=mv_histories.get(pid, []),
                         device_info=league_device,
                     )
                 )
@@ -644,11 +646,13 @@ class KickbasePlayerSensor(CoordinatorEntity, SensorEntity):
         player_id: str,
         initial_name: str,
         initial_player: dict[str, Any] | None = None,
+        initial_mv_history: list[dict[str, Any]] | None = None,
         device_info: Any,
     ) -> None:
         super().__init__(coordinator)
         self._player_id = player_id
         self._last_known: dict[str, Any] = initial_player or {}
+        self._last_known_mv_history: list[dict[str, Any]] = initial_mv_history or []
         self._attr_unique_id = f"{entry_id}_{league_id}_player_{player_id}"
         self._attr_name = f"Spieler {initial_name}"
         self._attr_device_info = device_info
@@ -695,6 +699,18 @@ class KickbasePlayerSensor(CoordinatorEntity, SensorEntity):
             return None
         pos = player.get("position") or {}
         st = player.get("status") or {}
+        sprob = player.get("starting_prob") or {}
+        data = self.coordinator.data
+        mv_history = (
+            (data.get("market_value_histories") or {}).get(self._player_id)
+            if isinstance(data, dict)
+            else None
+        )
+        if mv_history is not None:
+            self._last_known_mv_history = mv_history
+        else:
+            mv_history = self._last_known_mv_history
+
         return {
             "player_id": player.get("id"),
             "name": player.get("full_name") or player.get("name"),
@@ -709,10 +725,17 @@ class KickbasePlayerSensor(CoordinatorEntity, SensorEntity):
             "status": st.get("label_de"),
             "status_severity": st.get("severity"),
             "status_text": player.get("status_text"),
+            "starting_prob": sprob.get("label_de"),
+            "starting_prob_short": sprob.get("short"),
+            "starting_prob_code": player.get("starting_prob_code"),
             "market_value_24h_change": player.get("market_value_24h_change"),
             "market_value_since_buy": player.get("market_value_since_buy"),
             "market_value_season_diff": player.get("market_value_season_diff"),
             "market_value_trend": player.get("market_value_trend"),
+            "market_value_history": mv_history,
+            "market_value_history_count": len(mv_history),
+            "market_value_min": min((h.get("market_value", 0) for h in mv_history), default=None),
+            "market_value_max": max((h.get("market_value", 0) for h in mv_history), default=None),
             "total_points": player.get("total_points"),
             "average_points": player.get("average_points"),
             "goals": player.get("goals"),

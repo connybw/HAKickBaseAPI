@@ -975,11 +975,39 @@ class KickbaseLocalStore:
             dash = json.loads(row["dashboard_json"] or "{}")
             if row["local_avatar_path"]:
                 dash["local_avatar"] = row["local_avatar_path"]
+            squad = json.loads(row["squad_json"] or "[]")
+            squad_pids = [str(p.get("id")) for p in squad if p.get("id")]
+            if squad_pids:
+                placeholders = ",".join("?" for _ in squad_pids)
+                p_rows = conn.execute(
+                    f"""
+                    SELECT player_id, local_image_path, local_team_image_path, player_json
+                    FROM players
+                    WHERE league_id = ? AND player_id IN ({placeholders})
+                    """,
+                    [league_id, *squad_pids],
+                ).fetchall()
+                p_map = {str(pr["player_id"]): pr for pr in p_rows}
+                for sp in squad:
+                    pr = p_map.get(str(sp.get("id") or ""))
+                    if pr is None:
+                        continue
+                    if pr["local_image_path"]:
+                        sp["local_image"] = pr["local_image_path"]
+                    if pr["local_team_image_path"]:
+                        sp["local_team_image"] = pr["local_team_image_path"]
+                    try:
+                        p_data = json.loads(pr["player_json"] or "{}")
+                        if p_data.get("starting_prob") and not sp.get("starting_prob"):
+                            sp["starting_prob"] = p_data["starting_prob"]
+                            sp["starting_prob_code"] = p_data.get("starting_prob_code")
+                    except ValueError:
+                        pass
             return {
                 "from_local_db": True,
                 "db_updated_at": row["updated_at"],
                 "dashboard": dash,
-                "squad": json.loads(row["squad_json"] or "[]"),
+                "squad": squad,
                 "performance": json.loads(row["performance_json"] or "[]"),
                 "transfers": json.loads(row["transfers_json"] or "[]"),
             }
@@ -1363,7 +1391,7 @@ class KickbaseLocalStore:
                        points, total_points, average_points, goals, assists,
                        yellow_cards, red_cards, seconds_played,
                        owner_user_id, owner_name, is_on_market, is_scouted, market_price,
-                       expiry_at, scopes_json,
+                       expiry_at, scopes_json, player_json,
                        local_image_path AS local_image,
                        local_team_image_path AS local_team_image,
                        updated_at, details_updated_at, market_value_synced_at
@@ -1379,6 +1407,15 @@ class KickbaseLocalStore:
             results = []
             for r in rows:
                 p = dict(r)
+                raw_pjson = p.pop("player_json", None)
+                if raw_pjson:
+                    try:
+                        p_extra = json.loads(raw_pjson)
+                        if p_extra.get("starting_prob"):
+                            p["starting_prob"] = p_extra["starting_prob"]
+                            p["starting_prob_code"] = p_extra.get("starting_prob_code")
+                    except ValueError:
+                        pass
                 try:
                     p["scopes"] = json.loads(p.pop("scopes_json") or "[]")
                 except ValueError:
@@ -1403,4 +1440,37 @@ class KickbaseLocalStore:
         """Return all players stored in SQLite with full metadata for GUI explorer."""
         return await self._hass.async_add_executor_job(
             self._get_all_database_players_sync, league_id
+        )
+
+    def _get_all_market_value_histories_sync(
+        self, league_id: str
+    ) -> dict[str, list[dict[str, Any]]]:
+        conn = self._ensure_conn()
+        with self._lock:
+            rows = conn.execute(
+                """
+                SELECT player_id, recorded_date, market_value
+                FROM player_market_value_history
+                WHERE league_id = ?
+                ORDER BY recorded_date ASC
+                """,
+                (str(league_id),),
+            ).fetchall()
+            histories: dict[str, list[dict[str, Any]]] = {}
+            for r in rows:
+                pid = str(r["player_id"])
+                histories.setdefault(pid, []).append(
+                    {
+                        "date": r["recorded_date"],
+                        "market_value": r["market_value"],
+                    }
+                )
+            return histories
+
+    async def async_get_all_market_value_histories(
+        self, league_id: str
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return complete historical market value series per player ID from SQLite."""
+        return await self._hass.async_add_executor_job(
+            self._get_all_market_value_histories_sync, league_id
         )

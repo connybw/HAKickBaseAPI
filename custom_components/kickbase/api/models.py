@@ -115,6 +115,36 @@ def decode_match_status(status: int | None) -> str:
     return MATCH_STATUS_MAP.get(int(status), "unknown")
 
 
+STARTING_PROB_MAP: dict[int, dict[str, Any]] = {
+    1: {"code": 1, "key": "certain", "label_de": "Sicher (S11)", "short": "100%", "severity": "ok"},
+    2: {"code": 2, "key": "expected", "label_de": "Erwartet", "short": "75%", "severity": "ok"},
+    3: {"code": 3, "key": "uncertain", "label_de": "Unsicher", "short": "50%", "severity": "warning"},
+    4: {"code": 4, "key": "unlikely", "label_de": "Unwahrscheinlich", "short": "25%", "severity": "warning"},
+    5: {"code": 5, "key": "excluded", "label_de": "Ausgeschlossen", "short": "0%", "severity": "danger"},
+}
+
+
+def decode_starting_prob(
+    prob: Any = None, prob_history: Any = None
+) -> dict[str, Any] | None:
+    """Decode Kickbase starting XI probability (`prob` / `prb` / `ph`)."""
+    code = prob
+    if code is None and isinstance(prob_history, list) and prob_history:
+        last = prob_history[-1]
+        if isinstance(last, dict):
+            code = last.get("p") if last.get("p") is not None else last.get("prob")
+    if code is None:
+        return None
+    try:
+        int_code = int(code)
+    except (TypeError, ValueError):
+        return None
+    return STARTING_PROB_MAP.get(
+        int_code,
+        {"code": int_code, "key": f"prob_{int_code}", "label_de": f"S11 ({int_code})", "short": str(int_code), "severity": "muted"},
+    )
+
+
 def decode_activity_type(activity_type: int | None) -> dict[str, str]:
     """Decode activity feed item type (`t`)."""
     if activity_type is None:
@@ -137,6 +167,8 @@ def normalize_player(
     pos_code = raw.get("pos")
     status_code = raw.get("st")
     mvt_code = raw.get("mvt")
+    prob_raw = raw.get("prob") if raw.get("prob") is not None else raw.get("prb")
+    starting_prob = decode_starting_prob(prob_raw, raw.get("ph"))
 
     return {
         "id": player_id,
@@ -155,6 +187,8 @@ def normalize_player(
         "status_text": raw.get("stxt"),
         "last_status": raw.get("lst"),
         "matchday_status": raw.get("mdst"),
+        "starting_prob_code": starting_prob["code"] if starting_prob else None,
+        "starting_prob": starting_prob,
         "lineup_order": raw.get("lo"),
         "is_captain": bool(raw.get("ictp", False)),
         "market_value": raw.get("mv", 0),

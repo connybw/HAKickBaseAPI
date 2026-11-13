@@ -447,8 +447,11 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
             norm = normalize_player(raw_p, ibp)
             norm["is_on_market"] = True
             exs = norm.get("expiry_seconds")
-            if isinstance(exs, (int, float)) and exs <= 3600:
-                expiring_soon_count += 1
+            if isinstance(exs, (int, float)):
+                if not norm.get("expiry_at"):
+                    norm["expiry_at"] = (datetime.now(UTC) + timedelta(seconds=int(exs))).isoformat()
+                if exs <= 3600:
+                    expiring_soon_count += 1
             is_scouted = norm["id"] in scouted_ids
             norm["is_scouted"] = is_scouted
             norm["is_kickbase_seller"] = (
@@ -920,8 +923,14 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
                         m["local_team2_image"] = l2
                         m["team2_image"] = l2
 
-        # Index enriched players for returning fresh local_image into squad/lineup/market payloads
+        # Index enriched players for returning fresh local_image & starting_prob into payloads
         enriched_by_id = {item["player"]["id"]: item["player"] for item in enriched_items}
+
+        for mgr in managers_payload:
+            mgr["squad"] = [
+                _merge_player(sp, enriched_by_id.get(sp.get("id"), {}))
+                for sp in (mgr.get("squad") or [])
+            ]
 
         # ------------------------------------------------------------------
         # Phase 7: Atomic SQLite Persistence + HA Events
@@ -1082,6 +1091,7 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
             }
 
         db_stats = await self.store.async_get_stats(self.league_id)
+        mv_histories = await self.store.async_get_all_market_value_histories(self.league_id)
 
         league_snapshot = {
             MODULE_LEAGUE_OVERVIEW: overview_data,
@@ -1090,6 +1100,7 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
             MODULE_LIVE_MATCHDAY: live_data,
             MODULE_FEED_ACHIEVEMENTS: feed_data,
             "all_players": [item["player"] for item in enriched_items],
+            "market_value_histories": mv_histories,
             "daily_bonus": self._daily_bonus_info,
             "enabled_modules": sorted(self.enabled_modules),
             "db_stats": db_stats,
