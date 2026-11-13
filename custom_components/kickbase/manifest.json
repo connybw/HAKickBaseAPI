@@ -1,13 +1,13 @@
 {
   "domain": "kickbase",
   "name": "Kickbase",
-  "codeowners": ["@kickbase-ha"],
+  "codeowners": ["@connybw"],
   "config_flow": true,
   "dependencies": ["http", "frontend"],
-  "documentation": "https://github.com/kevinskyba/kickbase-api-doc",
+  "documentation": "https://github.com/connybw/HAKickBaseAPI",
   "integration_type": "service",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/kevinskyba/kickbase-api-doc/issues",
+  "issue_tracker": "https://github.com/connybw/HAKickBaseAPI/issues",
   "requirements": ["aiohttp>=3.9.0"],
   "version": "1.0.0"
 }

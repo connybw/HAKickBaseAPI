@@ -526,6 +526,15 @@ export function positionClass(posCode) {
   }
 }
 
+export function sortPlayersByPosition(players) {
+  return [...players].sort((a, b) => {
+    const posA = Number(a.position_code || (a.position && a.position.code) || 99);
+    const posB = Number(b.position_code || (b.position && b.position.code) || 99);
+    if (posA !== posB) return posA - posB;
+    return (b.market_value || 0) - (a.market_value || 0);
+  });
+}
+
 export function isLocalUrl(url) {
   return typeof url === "string" && (url.startsWith("/") || url.startsWith("data:"));
 }
@@ -718,6 +727,40 @@ class KickbaseStore {
 
   async getDbStats(hass, { entryId, leagueId } = {}) {
     const msg = { type: "kickbase/get_db_stats" };
+    if (entryId) msg.entry_id = entryId;
+    if (leagueId) msg.league_id = leagueId;
+    return hass.callWS(msg);
+  }
+
+  async getRequestLogs(hass, { entryId, leagueId, limit = 100, offset = 0 } = {}) {
+    const msg = { type: "kickbase/get_request_logs", limit, offset };
+    if (entryId) msg.entry_id = entryId;
+    if (leagueId) msg.league_id = leagueId;
+    return hass.callWS(msg);
+  }
+
+  async getRequestLogDetail(hass, { logId, entryId } = {}) {
+    const msg = { type: "kickbase/get_request_log_detail", log_id: Number(logId) };
+    if (entryId) msg.entry_id = entryId;
+    return hass.callWS(msg);
+  }
+
+  async getAllDatabasePlayers(hass, { entryId, leagueId } = {}) {
+    const msg = { type: "kickbase/get_all_database_players" };
+    if (entryId) msg.entry_id = entryId;
+    if (leagueId) msg.league_id = leagueId;
+    return hass.callWS(msg);
+  }
+
+  async collectDailyBonus(hass, { entryId, leagueId } = {}) {
+    const msg = { type: "kickbase/collect_daily_bonus" };
+    if (entryId) msg.entry_id = entryId;
+    if (leagueId) msg.league_id = leagueId;
+    return hass.callWS(msg);
+  }
+
+  async syncAllDatabasePlayers(hass, { entryId, leagueId } = {}) {
+    const msg = { type: "kickbase/sync_all_database_players" };
     if (entryId) msg.entry_id = entryId;
     if (leagueId) msg.league_id = leagueId;
     return hass.callWS(msg);

@@ -209,6 +209,11 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_search_players)
     websocket_api.async_register_command(hass, ws_get_challenge_detail)
     websocket_api.async_register_command(hass, ws_refresh)
+    websocket_api.async_register_command(hass, ws_get_request_logs)
+    websocket_api.async_register_command(hass, ws_get_request_log_detail)
+    websocket_api.async_register_command(hass, ws_get_all_database_players)
+    websocket_api.async_register_command(hass, ws_collect_daily_bonus)
+    websocket_api.async_register_command(hass, ws_sync_all_database_players)
 
 
 @websocket_api.websocket_command(
@@ -890,4 +895,148 @@ async def ws_refresh(
         )
         connection.send_result(msg["id"], payload)
     except ValueError as err:
+        connection.send_error(msg["id"], "kickbase_error", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "kickbase/get_request_logs",
+        vol.Optional("entry_id"): str,
+        vol.Optional("league_id"): str,
+        vol.Optional("limit", default=100): int,
+        vol.Optional("offset", default=0): int,
+    }
+)
+@websocket_api.async_response
+async def ws_get_request_logs(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Retrieve recent HTTP API call logs from SQLite for GUI inspection."""
+    try:
+        _, runtime = _resolve_runtime(
+            hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
+        )
+        limit = int(msg.get("limit", 100))
+        offset = int(msg.get("offset", 0))
+        logs = await runtime.store.async_get_request_logs(
+            limit=limit, offset=offset, league_id=msg.get("league_id")
+        )
+        connection.send_result(msg["id"], {"logs": logs, "count": len(logs)})
+    except Exception as err:
+        connection.send_error(msg["id"], "kickbase_error", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "kickbase/get_request_log_detail",
+        vol.Required("log_id"): int,
+        vol.Optional("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_get_request_log_detail(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Retrieve full request detail including stored response JSON."""
+    try:
+        _, runtime = _resolve_runtime(hass, entry_id=msg.get("entry_id"))
+        detail = await runtime.store.async_get_request_log_detail(int(msg["log_id"]))
+        if detail is None:
+            connection.send_error(
+                msg["id"], "not_found", f"Log ID {msg['log_id']} nicht gefunden"
+            )
+            return
+        connection.send_result(msg["id"], detail)
+    except Exception as err:
+        connection.send_error(msg["id"], "kickbase_error", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "kickbase/get_all_database_players",
+        vol.Optional("entry_id"): str,
+        vol.Optional("league_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_get_all_database_players(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return all players tracked in SQLite for GUI database table."""
+    try:
+        _, runtime = _resolve_runtime(
+            hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
+        )
+        target_league = msg.get("league_id") or runtime.primary_league_id
+        players = await runtime.store.async_get_all_database_players(target_league)
+        connection.send_result(
+            msg["id"], {"league_id": target_league, "players": players, "count": len(players)}
+        )
+    except Exception as err:
+        connection.send_error(msg["id"], "kickbase_error", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "kickbase/collect_daily_bonus",
+        vol.Optional("entry_id"): str,
+        vol.Optional("league_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_collect_daily_bonus(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Trigger daily bonus collection and refresh budget."""
+    try:
+        _, runtime = _resolve_runtime(
+            hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
+        )
+        target_league = msg.get("league_id") or runtime.primary_league_id
+        if target_league in runtime.leagues:
+            lset = runtime.leagues[target_league]
+            if lset.sync is not None:
+                res = await lset.sync.async_collect_daily_bonus()
+                connection.send_result(msg["id"], res)
+                return
+        connection.send_error(msg["id"], "league_not_found", f"Liga {target_league} nicht aktiv")
+    except Exception as err:
+        connection.send_error(msg["id"], "kickbase_error", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "kickbase/sync_all_database_players",
+        vol.Optional("entry_id"): str,
+        vol.Optional("league_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_sync_all_database_players(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Trigger bulk refresh of all players in SQLite."""
+    try:
+        _, runtime = _resolve_runtime(
+            hass, entry_id=msg.get("entry_id"), league_id=msg.get("league_id")
+        )
+        target_league = msg.get("league_id") or runtime.primary_league_id
+        if target_league in runtime.leagues:
+            lset = runtime.leagues[target_league]
+            if lset.sync is not None:
+                res = await lset.sync.async_sync_all_database_players()
+                connection.send_result(msg["id"], res)
+                return
+        connection.send_error(msg["id"], "league_not_found", f"Liga {target_league} nicht aktiv")
+    except Exception as err:
         connection.send_error(msg["id"], "kickbase_error", str(err))

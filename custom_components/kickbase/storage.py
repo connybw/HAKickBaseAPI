@@ -226,6 +226,20 @@ class KickbaseLocalStore:
                 payload_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS api_request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                league_id TEXT,
+                method TEXT NOT NULL,
+                url TEXT NOT NULL,
+                status_code INTEGER,
+                duration_ms INTEGER,
+                summary TEXT,
+                response_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_api_logs_created
+                ON api_request_logs (created_at DESC);
             """
         )
         conn.commit()
@@ -823,6 +837,23 @@ class KickbaseLocalStore:
             )
         )
 
+    async def async_upsert_players_batch(
+        self, league_id: str, players: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Convenience helper to upsert a batch of enriched players into SQLite."""
+        items = [{"player": p} if "player" not in p else p for p in players]
+        return await self.async_upsert_bulk_sync(
+            league_id=league_id,
+            players_payload=items,
+            managers_payload=[],
+            sync_meta={
+                "started_at": datetime.now(UTC).isoformat(),
+                "players_total": len(players),
+                "api_requests": 0,
+                "status": "db_players_sync",
+            },
+        )
+
     # ------------------------------------------------------------------
     # Read APIs (zero Kickbase network requests!)
     # ------------------------------------------------------------------
@@ -1160,4 +1191,216 @@ class KickbaseLocalStore:
         """Load cached JSON snapshot and timestamp from SQLite."""
         return await self._hass.async_add_executor_job(
             self._get_snapshot_sync, cache_key
+        )
+
+    # ------------------------------------------------------------------
+    # API Request Logging & DB Explorer Helpers (Item 4 & Item 8)
+    # ------------------------------------------------------------------
+    def _log_request_sync(
+        self,
+        method: str,
+        url: str,
+        status_code: int,
+        duration_ms: int,
+        response_data: Any,
+        league_id: str | None = None,
+        summary: str | None = None,
+    ) -> None:
+        conn = self._ensure_conn()
+        now_iso = datetime.now(UTC).isoformat()
+        try:
+            if isinstance(response_data, (dict, list)):
+                resp_str = json.dumps(response_data, ensure_ascii=False)
+            else:
+                resp_str = str(response_data or "")
+            # Cap stored response payload to 500KB to protect SQLite file size
+            if len(resp_str) > 500_000:
+                resp_str = resp_str[:500_000] + "... [TRUNCATED]"
+        except Exception as err:
+            resp_str = f'{{"error": "Serialization failed: {err}"}}'
+
+        with self._lock:
+            conn.execute(
+                """
+                INSERT INTO api_request_logs (
+                    league_id, method, url, status_code, duration_ms, summary, response_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    league_id,
+                    str(method).upper(),
+                    str(url),
+                    int(status_code),
+                    int(duration_ms),
+                    summary or "",
+                    resp_str,
+                    now_iso,
+                ),
+            )
+            # Retain only last 500 requests
+            conn.execute(
+                """
+                DELETE FROM api_request_logs
+                WHERE id NOT IN (
+                    SELECT id FROM api_request_logs ORDER BY id DESC LIMIT 500
+                )
+                """
+            )
+            conn.commit()
+
+    async def async_log_request(
+        self,
+        method: str,
+        url: str,
+        status_code: int,
+        duration_ms: int,
+        response_data: Any,
+        league_id: str | None = None,
+        summary: str | None = None,
+    ) -> None:
+        """Persist API request and response in SQLite for GUI inspection."""
+        await self._hass.async_add_executor_job(
+            self._log_request_sync,
+            method,
+            url,
+            status_code,
+            duration_ms,
+            response_data,
+            league_id,
+            summary,
+        )
+
+    def _get_request_logs_sync(
+        self, limit: int = 100, offset: int = 0, league_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        conn = self._ensure_conn()
+        with self._lock:
+            if league_id:
+                rows = conn.execute(
+                    """
+                    SELECT id, league_id, method, url, status_code, duration_ms, summary, created_at,
+                           substr(response_json, 1, 160) AS response_preview
+                    FROM api_request_logs
+                    WHERE league_id = ? OR league_id IS NULL
+                    ORDER BY id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (str(league_id), int(limit), int(offset)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, league_id, method, url, status_code, duration_ms, summary, created_at,
+                           substr(response_json, 1, 160) AS response_preview
+                    FROM api_request_logs
+                    ORDER BY id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (int(limit), int(offset)),
+                ).fetchall()
+
+            return [dict(r) for r in rows]
+
+    async def async_get_request_logs(
+        self, limit: int = 100, offset: int = 0, league_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Retrieve recent API request metadata for GUI log viewer."""
+        return await self._hass.async_add_executor_job(
+            self._get_request_logs_sync, limit, offset, league_id
+        )
+
+    def _get_request_log_detail_sync(self, log_id: int) -> dict[str, Any] | None:
+        conn = self._ensure_conn()
+        with self._lock:
+            row = conn.execute(
+                """
+                SELECT id, league_id, method, url, status_code, duration_ms, summary, response_json, created_at
+                FROM api_request_logs
+                WHERE id = ?
+                """,
+                (int(log_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    async def async_get_request_log_detail(self, log_id: int) -> dict[str, Any] | None:
+        """Retrieve full details and raw response JSON for a specific API call."""
+        return await self._hass.async_add_executor_job(
+            self._get_request_log_detail_sync, log_id
+        )
+
+    def _get_all_player_ids_sync(self, league_id: str | None = None) -> list[str]:
+        conn = self._ensure_conn()
+        with self._lock:
+            if league_id:
+                rows = conn.execute(
+                    "SELECT DISTINCT player_id FROM players WHERE league_id = ?",
+                    (str(league_id),),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT DISTINCT player_id FROM players").fetchall()
+            return [str(r[0]) for r in rows if r[0]]
+
+    async def async_get_all_player_ids(
+        self, league_id: str | None = None
+    ) -> list[str]:
+        """Return all distinct player IDs tracked in the SQLite DB."""
+        return await self._hass.async_add_executor_job(
+            self._get_all_player_ids_sync, league_id
+        )
+
+    def _get_all_database_players_sync(
+        self, league_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        conn = self._ensure_conn()
+        with self._lock:
+            sql = """
+                SELECT league_id, player_id AS id, name, full_name, first_name, last_name,
+                       team_id, team_name, shirt_number,
+                       position_code, position_short, position_name_de,
+                       status_code, status_key, status_label_de, status_severity, status_text,
+                       matchday_status, market_value, market_value_24h_change, market_value_since_buy,
+                       market_value_season_diff, market_value_trend,
+                       points, total_points, average_points, goals, assists,
+                       yellow_cards, red_cards, seconds_played,
+                       owner_user_id, owner_name, is_on_market, is_scouted, market_price,
+                       expiry_at, scopes_json,
+                       local_image_path AS local_image,
+                       local_team_image_path AS local_team_image,
+                       updated_at, details_updated_at, market_value_synced_at
+                FROM players
+            """
+            params: tuple[Any, ...] = ()
+            if league_id:
+                sql += " WHERE league_id = ?"
+                params = (str(league_id),)
+            sql += " ORDER BY market_value DESC"
+
+            rows = conn.execute(sql, params).fetchall()
+            results = []
+            for r in rows:
+                p = dict(r)
+                try:
+                    p["scopes"] = json.loads(p.pop("scopes_json") or "[]")
+                except ValueError:
+                    p["scopes"] = []
+                p["position"] = {
+                    "code": p.get("position_code"),
+                    "short": p.get("position_short") or "–",
+                    "name_de": p.get("position_name_de") or "Unbekannt",
+                }
+                p["status"] = {
+                    "code": p.get("status_code"),
+                    "key": p.get("status_key") or "ok",
+                    "label_de": p.get("status_label_de") or "Fit",
+                    "severity": p.get("status_severity") or "ok",
+                }
+                results.append(p)
+            return results
+
+    async def async_get_all_database_players(
+        self, league_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return all players stored in SQLite with full metadata for GUI explorer."""
+        return await self._hass.async_add_executor_job(
+            self._get_all_database_players_sync, league_id
         )

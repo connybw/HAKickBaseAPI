@@ -276,6 +276,32 @@ class TestKickbaseLocalStore(unittest.IsolatedAsyncioTestCase):
         missing, _ = await self.store.async_get_snapshot("does_not_exist")
         self.assertIsNone(missing)
 
+    async def test_api_request_logging_and_all_db_players(self) -> None:
+        await self.store.async_log_request(
+            method="GET",
+            url="https://api.kickbase.com/v4/leagues/1/overview",
+            status_code=200,
+            duration_ms=45,
+            response_data={"lnm": "Bundesliga Liga"},
+            league_id="1",
+            summary="Overview request",
+        )
+        logs = await self.store.async_get_request_logs(limit=10, league_id="1")
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]["method"], "GET")
+        self.assertEqual(logs[0]["status_code"], 200)
+
+        detail = await self.store.async_get_request_log_detail(logs[0]["id"])
+        self.assertIsNotNone(detail)
+        self.assertIn("Bundesliga Liga", detail["response_json"])
+
+        p_kane = _make_norm_player("4577", "Harry Kane", mv=72000000)
+        await self.store.async_upsert_players_batch("1", [p_kane])
+        all_players = await self.store.async_get_all_database_players("1")
+        self.assertEqual(len(all_players), 1)
+        self.assertEqual(all_players[0]["id"], "4577")
+        self.assertEqual(all_players[0]["position"]["short"], "ST")
+
 
 if __name__ == "__main__":
     unittest.main()

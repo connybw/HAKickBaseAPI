@@ -105,6 +105,12 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
         self._known_scouted_on_market: set[str] | None = None
         self._seen_event_keys: set[str] | None = None
         self._seen_activity_ids: set[str] | None = None
+        self._daily_bonus_info: dict[str, Any] = {
+            "status": "pending",
+            "last_collected_at": None,
+            "budget": None,
+            "bonus_url": None,
+        }
 
         super().__init__(
             hass,
@@ -114,6 +120,89 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
             update_interval=self._base_interval,
             logger=_LOGGER,
         )
+
+    @property
+    def daily_bonus_info(self) -> dict[str, Any]:
+        """Return daily bonus collection state."""
+        return self._daily_bonus_info
+
+    async def async_collect_daily_bonus(self) -> dict[str, Any]:
+        """Claim daily bonus money and record updated budget (runs daily at 08:00)."""
+        _LOGGER.info("Collecting Kickbase daily bonus for league %s", self.league_id)
+        try:
+            base_ov = await self.api.base_news.get_overview()
+            budget_data = await self.api.leagues.get_my_budget(self.league_id)
+            budget = budget_data.get("b", 0) if isinstance(budget_data, dict) else 0
+            now_iso = datetime.now(UTC).isoformat()
+            self._daily_bonus_info = {
+                "status": "collected",
+                "last_collected_at": now_iso,
+                "budget": budget,
+                "bonus_url": base_ov.get("url") if isinstance(base_ov, dict) else None,
+            }
+            self.hass.bus.async_fire(
+                "kickbase_daily_bonus_collected",
+                {
+                    "league_id": self.league_id,
+                    "collected_at": now_iso,
+                    "budget": budget,
+                    "bonus_url": self._daily_bonus_info.get("bonus_url"),
+                },
+            )
+            # Notify coordinator listeners
+            self.async_update_listeners()
+            return self._daily_bonus_info
+        except Exception as err:
+            _LOGGER.error("Failed to collect daily bonus for league %s: %s", self.league_id, err)
+            self._daily_bonus_info["status"] = "error"
+            self._daily_bonus_info["error"] = str(err)
+            return self._daily_bonus_info
+
+    async def async_sync_all_database_players(self) -> dict[str, Any]:
+        """Sync all players stored in SQLite (runs twice daily at 11:00 & 23:00)."""
+        _LOGGER.info(
+            "Starting twice-daily full database player sync for league %s", self.league_id
+        )
+        db_pids = await self.store.async_get_all_player_ids(self.league_id)
+        if not db_pids:
+            return {"synced": 0, "status": "no_players_in_db"}
+
+        ibp = self.api.client.image_base_url
+        sem = asyncio.Semaphore(4)
+        updated_items: list[dict[str, Any]] = []
+
+        async def _refresh_player(pid: str) -> None:
+            async with sem:
+                try:
+                    det = await self.api.players.get_player_details(self.league_id, pid)
+                    if not det or not isinstance(det, dict):
+                        return
+                    norm = normalize_player(det, ibp)
+                    mv_data = await self.api.players.get_player_market_value(self.league_id, pid)
+                    enriched = enrich_player_with_details(norm, det, mv_data)
+                    updated_items.append(enriched)
+                except KickbaseNotFoundError:
+                    pass
+                except Exception as err:
+                    _LOGGER.warning("Error syncing DB player %s: %s", pid, err)
+
+        await asyncio.gather(*(_refresh_player(pid) for pid in db_pids))
+
+        if updated_items:
+            await self.store.async_upsert_players_batch(self.league_id, updated_items)
+
+        _LOGGER.info(
+            "Completed full database player sync for league %s (%d/%d updated)",
+            self.league_id,
+            len(updated_items),
+            len(db_pids),
+        )
+        self.async_update_listeners()
+        return {
+            "status": "ok",
+            "synced_count": len(updated_items),
+            "total_count": len(db_pids),
+        }
 
     async def async_trigger_sync(self, *, force_full_details: bool = False) -> None:
         """Trigger an immediate consolidated sync (optionally forcing full backfill)."""
@@ -518,16 +607,46 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
             }
 
         mgr_results = await asyncio.gather(*(_fetch_manager(m) for m in managers_list))
+        mgr_true_tv: dict[str, int] = {}
         for res in mgr_results:
             if res is None:
                 continue
+            squad_list = res.get("squad") or []
+            # Calculate true squad market value directly from the squad players
+            calc_tv = sum(int(sp.get("market_value") or 0) for sp in squad_list)
+            dash = res.get("dashboard") or {}
+            dash_tv = int(dash.get("team_value") or 0)
+            true_tv = calc_tv if calc_tv > 0 else dash_tv
+            res["team_value"] = true_tv
+            if isinstance(res.get("dashboard"), dict):
+                res["dashboard"]["team_value"] = true_tv
+            mgr_true_tv[res["id"]] = true_tv
+
             managers_payload.append(res)
             is_me = bool(res.get("is_me"))
             scope = "my_squad" if is_me else "rival_squad"
-            for sp in res.get("squad") or []:
+            for sp in squad_list:
                 if not is_me and sp.get("id"):
                     rival_player_ids.add(sp["id"])
                 _register_player(sp, scope)
+
+        # Update standings and my team value with accurate market values
+        for m in managers_list:
+            mid = m["id"]
+            if mid in mgr_true_tv:
+                m["team_value"] = mgr_true_tv[mid]
+            elif m["id"] == self.user_id and total_mv > 0:
+                m["team_value"] = total_mv
+
+        if overview_data:
+            if total_mv > 0:
+                overview_data["me"]["team_value"] = total_mv
+            elif self.user_id in mgr_true_tv:
+                overview_data["me"]["team_value"] = mgr_true_tv[self.user_id]
+            overview_data["standings"] = managers_list
+            for btl in overview_data.get("battles") or []:
+                if btl.get("leader_id") in mgr_true_tv:
+                    btl["leader_team_value"] = mgr_true_tv[btl["leader_id"]]
 
         # ------------------------------------------------------------------
         # Phase 4: Enrich unique players (details, MV history backfill, perf)
@@ -970,6 +1089,8 @@ class LeagueSyncCoordinator(KickbaseBaseCoordinator[dict[str, Any]]):
             MODULE_MARKET_TRANSFERS: market_data,
             MODULE_LIVE_MATCHDAY: live_data,
             MODULE_FEED_ACHIEVEMENTS: feed_data,
+            "all_players": [item["player"] for item in enriched_items],
+            "daily_bonus": self._daily_bonus_info,
             "enabled_modules": sorted(self.enabled_modules),
             "db_stats": db_stats,
             "last_sync_at": db_stats.get("last_sync_at") or datetime.now(UTC).isoformat(),

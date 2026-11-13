@@ -437,7 +437,13 @@ def install_stubs() -> None:
 
     # helpers
     helpers = types.ModuleType("homeassistant.helpers")
+    helpers.__path__ = []
     sys.modules["homeassistant.helpers"] = helpers
+
+    ev_mod = types.ModuleType("homeassistant.helpers.event")
+    ev_mod.async_track_time_change = lambda hass, action, **kw: (lambda: None)
+    helpers.event = ev_mod
+    sys.modules["homeassistant.helpers.event"] = ev_mod
 
     uc = types.ModuleType("homeassistant.helpers.update_coordinator")
 

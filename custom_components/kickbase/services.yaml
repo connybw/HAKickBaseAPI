@@ -123,3 +123,23 @@ query_local_players:
           min: 1
           max: 500
           mode: box
+
+collect_daily_bonus:
+  name: Tägliches Bonusgeld sichern
+  description: Ruft den täglichen Login-Bonus (/v4/base/overview) ab und aktualisiert das Liga-Budget (automatisch jeden Tag um 08:00 Uhr).
+  fields:
+    league_id:
+      name: Liga-ID (optional)
+      description: Wenn angegeben, wird das Budget nur für diese Liga geprüft.
+      selector:
+        text:
+
+sync_all_database_players:
+  name: Alle Datenbank-Spieler synchronisieren
+  description: Aktualisiert dauerhaft alle bereits in der SQLite-Datenbank vorhandenen Spieler (läuft automatisch um 11:00 und 23:00 Uhr).
+  fields:
+    league_id:
+      name: Liga-ID (optional)
+      description: Wenn angegeben, werden nur die Spieler dieser Liga aktualisiert.
+      selector:
+        text:

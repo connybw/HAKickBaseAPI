@@ -117,6 +117,35 @@ LOCAL_DB_SENSORS: tuple[KickbaseSensorDescription, ...] = (
             ),
         },
     ),
+    KickbaseSensorDescription(
+        key="daily_bonus",
+        name="Täglicher Bonus",
+        icon="mdi:gift-outline",
+        value_fn=lambda d: (d.get("daily_bonus") or {}).get("status", "pending"),
+        attrs_fn=lambda d: d.get("daily_bonus") or {},
+    ),
+    KickbaseSensorDescription(
+        key="db_size",
+        name="Lokale DB Größe",
+        icon="mdi:database-outline",
+        native_unit_of_measurement="kB",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: (d.get("db_stats") or {}).get("db_size_kb", 0),
+    ),
+    KickbaseSensorDescription(
+        key="db_photos",
+        name="Lokale Fotos gecached",
+        icon="mdi:image-multiple",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: (d.get("db_stats") or {}).get("photos_cached", 0),
+    ),
+    KickbaseSensorDescription(
+        key="api_requests_total",
+        name="API Requests (letzter Sync)",
+        icon="mdi:cloud-sync-outline",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.get("last_api_requests", 0),
+    ),
 )
 
 LEAGUE_OVERVIEW_SENSORS: tuple[KickbaseSensorDescription, ...] = (
@@ -472,21 +501,43 @@ async def async_setup_entry(
                         module_key=MODULE_SQUAD_LINEUP,
                     )
                 )
+
+        # Create individual player sensors for ALL known league & DB players (Item 9)
+        if enable_player_entities:
+            all_known_players: dict[str, dict[str, Any]] = {}
+            for p in (lset.sync.data or {}).get("all_players") or []:
+                if p.get("id"):
+                    all_known_players[p["id"]] = p
+
             squad_sub = (lset.sync.data or {}).get(MODULE_SQUAD_LINEUP) or {}
-            if enable_player_entities and squad_sub:
-                for player in squad_sub.get("squad") or []:
-                    pid = player.get("id")
-                    if pid:
-                        entities.append(
-                            KickbasePlayerSensor(
-                                coordinator=lset.sync,
-                                entry_id=entry.entry_id,
-                                league_id=lid,
-                                player_id=pid,
-                                initial_name=player.get("full_name") or player.get("name") or pid,
-                                device_info=league_device,
-                            )
-                        )
+            for p in squad_sub.get("squad") or []:
+                if p.get("id"):
+                    all_known_players.setdefault(p["id"], p)
+
+            market_sub = (lset.sync.data or {}).get(MODULE_MARKET_TRANSFERS) or {}
+            for p in (market_sub.get("market") or []) + (market_sub.get("scouted") or []):
+                if p.get("id"):
+                    all_known_players.setdefault(p["id"], p)
+
+            # Query SQLite DB for any previously synced players
+            db_players = await runtime.store.async_get_all_database_players(lid)
+            for p in db_players:
+                if p.get("id"):
+                    all_known_players.setdefault(p["id"], p)
+
+            for pid, player in all_known_players.items():
+                p_name = player.get("full_name") or player.get("name") or pid
+                entities.append(
+                    KickbasePlayerSensor(
+                        coordinator=lset.sync,
+                        entry_id=entry.entry_id,
+                        league_id=lid,
+                        player_id=pid,
+                        initial_name=p_name,
+                        initial_player=player,
+                        device_info=league_device,
+                    )
+                )
 
         if runtime.is_module_enabled(MODULE_MARKET_TRANSFERS):
             for desc in MARKET_TRANSFERS_SENSORS:
@@ -592,29 +643,38 @@ class KickbasePlayerSensor(CoordinatorEntity, SensorEntity):
         league_id: str,
         player_id: str,
         initial_name: str,
+        initial_player: dict[str, Any] | None = None,
         device_info: Any,
     ) -> None:
         super().__init__(coordinator)
         self._player_id = player_id
+        self._last_known: dict[str, Any] = initial_player or {}
         self._attr_unique_id = f"{entry_id}_{league_id}_player_{player_id}"
         self._attr_name = f"Spieler {initial_name}"
         self._attr_device_info = device_info
 
     def _find_player(self) -> dict[str, Any] | None:
         data = self.coordinator.data
-        if not isinstance(data, dict):
-            return None
-        squad_sub = data.get(MODULE_SQUAD_LINEUP) if MODULE_SQUAD_LINEUP in data else data
-        if not isinstance(squad_sub, dict):
-            return None
-        for p in squad_sub.get("squad") or []:
-            if p.get("id") == self._player_id:
-                return p
-        return None
+        if isinstance(data, dict):
+            for p in data.get("all_players") or []:
+                if p.get("id") == self._player_id:
+                    self._last_known = p
+                    return p
+            squad_sub = data.get(MODULE_SQUAD_LINEUP) or {}
+            for p in squad_sub.get("squad") or []:
+                if p.get("id") == self._player_id:
+                    self._last_known = p
+                    return p
+            m_sub = data.get(MODULE_MARKET_TRANSFERS) or {}
+            for p in (m_sub.get("market") or []) + (m_sub.get("scouted") or []):
+                if p.get("id") == self._player_id:
+                    self._last_known = p
+                    return p
+        return self._last_known or None
 
     @property
     def available(self) -> bool:
-        return super().available and self._find_player() is not None
+        return self._find_player() is not None
 
     @property
     def native_value(self) -> Any:
@@ -633,17 +693,36 @@ class KickbasePlayerSensor(CoordinatorEntity, SensorEntity):
         player = self._find_player()
         if not player:
             return None
+        pos = player.get("position") or {}
+        st = player.get("status") or {}
         return {
             "player_id": player.get("id"),
             "name": player.get("full_name") or player.get("name"),
-            "position": (player.get("position") or {}).get("name_de"),
-            "status": (player.get("status") or {}).get("label_de"),
+            "first_name": player.get("first_name"),
+            "last_name": player.get("last_name"),
+            "team_id": player.get("team_id"),
+            "team_name": player.get("team_name"),
+            "shirt_number": player.get("shirt_number"),
+            "position": pos.get("name_de") or pos.get("short"),
+            "position_short": pos.get("short"),
+            "position_code": pos.get("code") or player.get("position_code"),
+            "status": st.get("label_de"),
+            "status_severity": st.get("severity"),
             "status_text": player.get("status_text"),
             "market_value_24h_change": player.get("market_value_24h_change"),
             "market_value_since_buy": player.get("market_value_since_buy"),
+            "market_value_season_diff": player.get("market_value_season_diff"),
             "market_value_trend": player.get("market_value_trend"),
             "total_points": player.get("total_points"),
             "average_points": player.get("average_points"),
+            "goals": player.get("goals"),
+            "assists": player.get("assists"),
+            "owner_name": player.get("owner_name"),
+            "owner_user_id": player.get("owner_user_id"),
+            "is_on_market": player.get("is_on_market"),
+            "is_scouted": player.get("is_scouted"),
+            "market_price": player.get("market_price"),
+            "expiry_at": player.get("expiry_at"),
             "in_starting_eleven": player.get("in_starting_eleven"),
             "local_image": player.get("local_image"),
             "scopes": player.get("scopes"),

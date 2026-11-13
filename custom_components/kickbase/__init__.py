@@ -16,6 +16,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_change
 
 from .api import KickbaseApi
 from .const import (
@@ -218,6 +219,36 @@ def _async_ensure_services(hass: HomeAssistant) -> None:
             }
         return {"found": True, "league_id": lid, **data}
 
+    async def _handle_collect_daily_bonus(call: ServiceCall) -> dict[str, Any]:
+        target_league = call.data.get("league_id")
+        results: dict[str, Any] = {}
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            rt: KickbaseRuntimeData | None = getattr(entry, "runtime_data", None)
+            if rt is None:
+                continue
+            for lid, lset in rt.leagues.items():
+                if target_league and lid != target_league:
+                    continue
+                if lset.sync is not None:
+                    res = await lset.sync.async_collect_daily_bonus()
+                    results[lid] = res
+        return {"success": True, "results": results}
+
+    async def _handle_sync_all_database_players(call: ServiceCall) -> dict[str, Any]:
+        target_league = call.data.get("league_id")
+        results: dict[str, Any] = {}
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            rt: KickbaseRuntimeData | None = getattr(entry, "runtime_data", None)
+            if rt is None:
+                continue
+            for lid, lset in rt.leagues.items():
+                if target_league and lid != target_league:
+                    continue
+                if lset.sync is not None:
+                    res = await lset.sync.async_sync_all_database_players()
+                    results[lid] = res
+        return {"success": True, "results": results}
+
     async def _handle_query_local_players(call: ServiceCall) -> dict[str, Any]:
         resolved = _resolve_service_runtime(hass, call.data.get("league_id"))
         if resolved is None:
@@ -282,6 +313,28 @@ def _async_ensure_services(hass: HomeAssistant) -> None:
         ),
         supports_response=SupportsResponse.ONLY,
     )
+    hass.services.async_register(
+        DOMAIN,
+        "collect_daily_bonus",
+        _handle_collect_daily_bonus,
+        schema=vol.Schema(
+            {
+                vol.Optional("league_id"): cv.string,
+            }
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "sync_all_database_players",
+        _handle_sync_all_database_players,
+        schema=vol.Schema(
+            {
+                vol.Optional("league_id"): cv.string,
+            }
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.data[_SERVICES_REGISTERED_KEY] = True
 
 
@@ -313,6 +366,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: KickbaseConfigEntry) -> 
 
     session = async_get_clientsession(hass)
     api = KickbaseApi(session, email, password)
+
+    def _log_api_call(
+        method: str, url: str, status: int, duration_ms: int, resp: Any
+    ) -> None:
+        hass.async_create_task(
+            store.async_log_request(
+                method=method,
+                url=url,
+                status_code=status,
+                duration_ms=duration_ms,
+                response_data=resp,
+            )
+        )
+
+    api.client.set_request_logger(_log_api_call)
 
     try:
         # 1. Global AccountCoordinator (handles initial login, competitions, event types & league discovery)
@@ -420,6 +488,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: KickbaseConfigEntry) -> 
     entry.runtime_data = runtime
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+    # Schedule daily bonus collection at 08:00 AM (Item 7)
+    async def _daily_bonus_cron(now: Any) -> None:
+        _LOGGER.info("Executing scheduled 08:00 Kickbase bonus collection")
+        for lid, lset in runtime.leagues.items():
+            if lset.sync is not None:
+                await lset.sync.async_collect_daily_bonus()
+
+    cancel_bonus_timer = async_track_time_change(
+        hass, _daily_bonus_cron, hour=8, minute=0, second=0
+    )
+    entry.async_on_unload(cancel_bonus_timer)
+
+    # Schedule full database player sync twice daily at 11:00 AM & 23:00 PM (Item 5)
+    async def _db_full_sync_cron(now: Any) -> None:
+        _LOGGER.info("Executing scheduled twice-daily full database player sync (11:00 / 23:00)")
+        for lid, lset in runtime.leagues.items():
+            if lset.sync is not None:
+                await lset.sync.async_sync_all_database_players()
+
+    cancel_sync_11 = async_track_time_change(
+        hass, _db_full_sync_cron, hour=11, minute=0, second=0
+    )
+    cancel_sync_23 = async_track_time_change(
+        hass, _db_full_sync_cron, hour=23, minute=0, second=0
+    )
+    entry.async_on_unload(cancel_sync_11)
+    entry.async_on_unload(cancel_sync_23)
 
     _sync_sidebar_panel(hass)
     return True

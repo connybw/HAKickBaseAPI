@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 import logging
-from typing import Any
+import time
+from typing import Any, Callable
 
 import aiohttp
 
@@ -52,6 +53,13 @@ class KickbaseApiClient:
         self._image_base_url: str = DEFAULT_IMAGE_BASE_URL
         self._login_payload: dict[str, Any] = {}
         self._request_count: int = 0
+        self._request_logger: Callable[[str, str, int, int, Any], Any] | None = None
+
+    def set_request_logger(
+        self, logger_fn: Callable[[str, str, int, int, Any], Any] | None
+    ) -> None:
+        """Register a callback to capture all HTTP requests & responses for GUI inspection."""
+        self._request_logger = logger_fn
 
     @property
     def request_count(self) -> int:
@@ -220,6 +228,7 @@ class KickbaseApiClient:
         for attempt in range(max_attempts):
             retry_delay: float | None = None
             needs_relogin = False
+            start_mono = time.monotonic()
             try:
                 async with self._semaphore:
                     self._request_count += 1
@@ -231,6 +240,7 @@ class KickbaseApiClient:
                         headers=headers,
                         timeout=self._timeout,
                     ) as resp:
+                        duration_ms = int((time.monotonic() - start_mono) * 1000)
                         if resp.status == 401:
                             text = await resp.text()
                             if retry_on_401 and authenticated:
@@ -285,17 +295,31 @@ class KickbaseApiClient:
                             )
 
                         elif resp.content_length == 0:
-                            return {}
+                            parsed_res = {}
+                            if self._request_logger:
+                                try:
+                                    self._request_logger(method_upper, url, resp.status, duration_ms, parsed_res)
+                                except Exception:
+                                    pass
+                            return parsed_res
 
                         else:
                             content_type = resp.headers.get("Content-Type", "")
                             if "application/json" in content_type or not content_type:
                                 try:
-                                    return await resp.json(content_type=None)
+                                    parsed_res = await resp.json(content_type=None)
                                 except (ValueError, aiohttp.ContentTypeError):
                                     text = await resp.text()
-                                    return {"raw": text} if text else {}
-                            return {"raw": await resp.text()}
+                                    parsed_res = {"raw": text} if text else {}
+                            else:
+                                parsed_res = {"raw": await resp.text()}
+
+                            if self._request_logger:
+                                try:
+                                    self._request_logger(method_upper, url, resp.status, duration_ms, parsed_res)
+                                except Exception:
+                                    pass
+                            return parsed_res
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 if attempt < max_attempts - 1:

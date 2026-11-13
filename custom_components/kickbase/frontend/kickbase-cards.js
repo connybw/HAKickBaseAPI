@@ -239,6 +239,14 @@ class KickbaseBaseCard extends HTMLElement {
             ? `<div class="kb-empty">Kickbase Integration noch nicht konfiguriert.</div>`
             : bodyHtml
         }
+        ${
+          this._snapshot && this._snapshot.last_sync_at
+            ? `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);font-size:10px;color:var(--kb-muted)">
+                 <span>💾 Letzter Sync: ${formatDateTime(this._snapshot.last_sync_at)}</span>
+                 <span>📸 ${this._snapshot.db_stats?.photos_cached ?? 0} Fotos · ${this._snapshot.db_stats?.players_count ?? 0} Spieler</span>
+               </div>`
+            : ""
+        }
       </div>
     `;
     this._bindRefreshButton();
@@ -393,6 +401,11 @@ class KickbaseSquadCard extends KickbaseBaseCard {
       players = players.filter((p) => String(p.position_code) === this._posFilter);
     }
     players.sort((a, b) => {
+      if (this._sort === "pos") {
+        const pa = Number(a.position_code || (a.position && a.position.code) || 9);
+        const pb = Number(b.position_code || (b.position && b.position.code) || 9);
+        return pa !== pb ? pa - pb : (b.market_value || 0) - (a.market_value || 0);
+      }
       if (this._sort === "trend") return (b.market_value_24h_change || 0) - (a.market_value_24h_change || 0);
       if (this._sort === "ap") return (b.average_points || 0) - (a.average_points || 0);
       if (this._sort === "profit") return (b.market_value_since_buy || 0) - (a.market_value_since_buy || 0);
@@ -409,6 +422,7 @@ class KickbaseSquadCard extends KickbaseBaseCard {
         <button class="kb-btn ${this._posFilter === "3" ? "active" : ""}" data-pos="3">MF</button>
         <button class="kb-btn ${this._posFilter === "4" ? "active" : ""}" data-pos="4">ST</button>
         <span style="flex:1"></span>
+        <button class="kb-btn ${this._sort === "pos" ? "active" : ""}" data-sort="pos">Position</button>
         <button class="kb-btn ${this._sort === "mv" ? "active" : ""}" data-sort="mv">Marktwert</button>
         <button class="kb-btn ${this._sort === "trend" ? "active" : ""}" data-sort="trend">24h Trend</button>
         <button class="kb-btn ${this._sort === "ap" ? "active" : ""}" data-sort="ap">Ø Pkt</button>
@@ -487,6 +501,7 @@ class KickbaseMarketCard extends KickbaseBaseCard {
   constructor() {
     super();
     this._tab = "market";
+    this._sort = "price";
   }
   getCardSize() { return 6; }
 
@@ -500,7 +515,16 @@ class KickbaseMarketCard extends KickbaseBaseCard {
       );
     }
 
-    const items = this._tab === "scouted" ? (mk.scouted || []) : (mk.market || []);
+    let items = [...(this._tab === "scouted" ? (mk.scouted || []) : (mk.market || []))];
+    items.sort((a, b) => {
+      if (this._sort === "pos") {
+        const pa = Number(a.position_code || (a.position && a.position.code) || 9);
+        const pb = Number(b.position_code || (b.position && b.position.code) || 9);
+        return pa !== pb ? pa - pb : (b.price || b.market_value || 0) - (a.price || a.market_value || 0);
+      }
+      if (this._sort === "trend") return (b.market_value_24h_change || 0) - (a.market_value_24h_change || 0);
+      return (b.price || b.market_value || 0) - (a.price || a.market_value || 0);
+    });
     const limit = Number(this._config.limit || 15);
     const list = items.slice(0, limit);
 
@@ -508,6 +532,10 @@ class KickbaseMarketCard extends KickbaseBaseCard {
       <div class="kb-tabs">
         <button class="kb-btn ${this._tab === "market" ? "active" : ""}" data-tab="market">Transfermarkt (${mk.market_count ?? 0})</button>
         <button class="kb-btn ${this._tab === "scouted" ? "active" : ""}" data-tab="scouted">Scout-Liste (${mk.scouted_count ?? 0})</button>
+        <span style="flex:1"></span>
+        <button class="kb-btn ${this._sort === "pos" ? "active" : ""}" data-sort="pos">Position</button>
+        <button class="kb-btn ${this._sort === "price" ? "active" : ""}" data-sort="price">Preis</button>
+        <button class="kb-btn ${this._sort === "trend" ? "active" : ""}" data-sort="trend">Trend</button>
       </div>
       <div class="kb-list">
         ${
@@ -554,6 +582,12 @@ class KickbaseMarketCard extends KickbaseBaseCard {
     this.shadowRoot.querySelectorAll("[data-tab]").forEach((btn) =>
       btn.addEventListener("click", () => {
         this._tab = btn.dataset.tab;
+        this._render();
+      })
+    );
+    this.shadowRoot.querySelectorAll("[data-sort]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._sort = btn.dataset.sort;
         this._render();
       })
     );
@@ -650,6 +684,12 @@ class KickbaseStandingsCard extends KickbaseBaseCard {
     this.shadowRoot.querySelectorAll("[data-tab]").forEach((btn) =>
       btn.addEventListener("click", () => {
         this._tab = btn.dataset.tab;
+        this._render();
+      })
+    );
+    this.shadowRoot.querySelectorAll("[data-sort]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._sort = btn.dataset.sort;
         this._render();
       })
     );
@@ -782,6 +822,12 @@ class KickbaseLiveCard extends KickbaseBaseCard {
         this._render();
       })
     );
+    this.shadowRoot.querySelectorAll("[data-sort]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._sort = btn.dataset.sort;
+        this._render();
+      })
+    );
     this.shadowRoot.querySelectorAll("[data-match-id]").forEach((el) =>
       el.addEventListener("click", () => {
         openKickbaseModal(this.shadowRoot, this._hass, "match", {
@@ -911,6 +957,12 @@ class KickbaseFeedNewsCard extends KickbaseBaseCard {
     this.shadowRoot.querySelectorAll("[data-tab]").forEach((btn) =>
       btn.addEventListener("click", () => {
         this._tab = btn.dataset.tab;
+        this._render();
+      })
+    );
+    this.shadowRoot.querySelectorAll("[data-sort]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._sort = btn.dataset.sort;
         this._render();
       })
     );

@@ -57,11 +57,17 @@ class KickbasePanel extends HTMLElement {
     // Local DB Explorer state
     this._dbScope = "all";
     this._dbStatus = "all";
+    this._dbSort = "pos";
     this._dbQuery = "";
     this._dbPlayers = [];
     this._dbStats = null;
     this._dbLoading = false;
     this._dbLoadedLeague = null;
+
+    // API Logs state (Item 8)
+    this._apiLogs = [];
+    this._apiLogsLoading = false;
+    this._apiLogFilter = "";
   }
 
   _loadHiddenCards() {
@@ -192,7 +198,8 @@ class KickbasePanel extends HTMLElement {
 
     const tabs = [
       { id: "dashboard", label: "Modulares Dashboard", show: true },
-      { id: "local_db", label: `💾 Lokale Datenbank${dbStats ? ` (${dbStats.players_count ?? 0})` : ""}`, show: Boolean(snap?.configured) },
+      { id: "local_db", label: `💾 Alle Spieler DB${dbStats ? ` (${dbStats.players_count ?? 0})` : ""}`, show: Boolean(snap?.configured) },
+      { id: "api_logs", label: "📋 API & DB Logs", show: Boolean(snap?.configured) },
       { id: "squad", label: "Kader & Aufstellung", show: enabled.has("squad_lineup") },
       { id: "market", label: "Transfermarkt", show: enabled.has("market_transfers") },
       { id: "live", label: "Live & Bundesliga", show: enabled.has("live_matchday") },
@@ -358,6 +365,12 @@ class KickbasePanel extends HTMLElement {
       if (this._dbLoadedLeague !== targetLid && !this._dbLoading) {
         this._loadLocalDbPlayers();
       }
+    } else if (this._activeTab === "api_logs") {
+      mainContent.innerHTML = `<div id="kb-api-logs-slot"></div>`;
+      this._renderApiLogsView();
+      if (!this._apiLogs.length && !this._apiLogsLoading) {
+        this._loadApiLogs();
+      }
     } else {
       const grid = document.createElement("div");
       grid.className = "kb-grid";
@@ -391,6 +404,18 @@ class KickbasePanel extends HTMLElement {
     const activeLeagueId = this._selectedLeagueId || this._snapshot?.selected_league_id;
     const players = this._dbPlayers || [];
 
+    let sortedPlayers = [...players];
+    sortedPlayers.sort((a, b) => {
+      if (this._dbSort === "pos") {
+        const pa = Number(a.position_code || (a.position && a.position.code) || 99);
+        const pb = Number(b.position_code || (b.position && b.position.code) || 99);
+        return pa !== pb ? pa - pb : (b.market_value || 0) - (a.market_value || 0);
+      }
+      if (this._dbSort === "trend") return (b.market_value_24h_change || 0) - (a.market_value_24h_change || 0);
+      if (this._dbSort === "name") return (a.name || "").localeCompare(b.name || "");
+      return (b.market_value || 0) - (a.market_value || 0);
+    });
+
     slot.innerHTML = `
       <div class="kb-card">
         <div class="kb-card-header">
@@ -406,6 +431,8 @@ class KickbasePanel extends HTMLElement {
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="kb-btn" id="kb-db-sync-now" ${this._loading ? "disabled" : ""} title="Manuellen Abruf vom Kickbase-Server außerhalb des 1h-Intervalls starten">${this._loading ? "⏳ Server-Sync..." : "🌐 Server-Sync jetzt"}</button>
             <button class="kb-btn" id="kb-db-sync-full" ${this._loading ? "disabled" : ""} title="Erzwingt kompletten Historien-Download vom Server für alle Spieler">📊 Komplette Historie laden</button>
+            <button class="kb-btn" id="kb-btn-claim-bonus" title="Tägliches Bonusgeld sichern (jeden Tag um 08:00 Uhr)">🎁 Bonus sichern</button>
+            <button class="kb-btn" id="kb-btn-sync-all-players" title="Alle Spieler in SQLite dauerhaft aktualisieren (11:00 / 23:00 Uhr)">⚡ DB-Spieler syncen</button>
           </div>
         </div>
 
@@ -445,12 +472,20 @@ class KickbasePanel extends HTMLElement {
           <input class="kb-input" id="kb-db-filter-input" type="search" placeholder="Name / Manager filtern..." value="${escapeHtml(this._dbQuery)}"/>
         </div>
 
+        <div class="kb-tabs" style="align-items:center;margin-top:8px">
+          <span style="font-size:11px;color:var(--kb-muted);margin-right:6px">Sortierung:</span>
+          <button class="kb-btn ${this._dbSort === "pos" ? "active" : ""}" data-db-sort="pos">Position</button>
+          <button class="kb-btn ${this._dbSort === "mv" ? "active" : ""}" data-db-sort="mv">Marktwert</button>
+          <button class="kb-btn ${this._dbSort === "trend" ? "active" : ""}" data-db-sort="trend">24h Trend</button>
+          <button class="kb-btn ${this._dbSort === "name" ? "active" : ""}" data-db-sort="name">Name</button>
+        </div>
+
         <div class="kb-list">
           ${
-            this._dbLoading && !players.length
+            this._dbLoading && !sortedPlayers.length
               ? `<div class="kb-empty">Lade lokale Datenbank...</div>`
-              : players.length
-              ? players
+              : sortedPlayers.length
+              ? sortedPlayers
                   .map((p) => {
                     const chg = Number(p.market_value_24h_change || 0);
                     const pImg = playerImg(p);
@@ -507,6 +542,18 @@ class KickbasePanel extends HTMLElement {
         this._loadLocalDbPlayers();
       });
     }
+    slot.querySelectorAll("[data-db-sort]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        this._dbSort = btn.dataset.dbSort;
+        this._renderLocalDbView();
+      })
+    );
+    slot.querySelector("#kb-btn-claim-bonus")?.addEventListener("click", () => {
+      this._claimDailyBonus(activeLeagueId);
+    });
+    slot.querySelector("#kb-btn-sync-all-players")?.addEventListener("click", () => {
+      this._syncAllDbPlayers(activeLeagueId);
+    });
     slot.querySelector("#kb-db-sync-now")?.addEventListener("click", () => {
       this._triggerSync(activeLeagueId, false);
     });
@@ -544,6 +591,176 @@ class KickbasePanel extends HTMLElement {
       if (this._activeTab === "local_db") {
         this._loadLocalDbPlayers();
       }
+    }
+  }
+
+  async _claimDailyBonus(leagueId) {
+    if (!this._hass || this._bonusLoading) return;
+    this._bonusLoading = true;
+    try {
+      const res = await kickbaseStore.collectDailyBonus(this._hass, { leagueId });
+      alert(`Daily Bonus: ${res?.status || "erfolgreich"} · Budget: ${formatCompactEur(res?.budget)}`);
+      this._loadSnapshot(true);
+    } catch (err) {
+      alert(`Fehler beim Bonus-Abruf: ${err.message || err}`);
+    } finally {
+      this._bonusLoading = false;
+    }
+  }
+
+  async _syncAllDbPlayers(leagueId) {
+    if (!this._hass || this._dbSyncLoading) return;
+    this._dbSyncLoading = true;
+    try {
+      const res = await kickbaseStore.syncAllDatabasePlayers(this._hass, { leagueId });
+      alert(`DB-Sync abgeschlossen: ${res?.synced_count ?? 0} von ${res?.total_count ?? 0} Spielern aktualisiert.`);
+      this._loadSnapshot(true);
+    } catch (err) {
+      alert(`Fehler beim DB-Sync: ${err.message || err}`);
+    } finally {
+      this._dbSyncLoading = false;
+    }
+  }
+
+  async _loadApiLogs() {
+    if (!this._hass) return;
+    this._apiLogsLoading = true;
+    this._renderApiLogsView();
+    try {
+      const lid = this._selectedLeagueId || this._snapshot?.selected_league_id;
+      const res = await kickbaseStore.getRequestLogs(this._hass, { leagueId: lid, limit: 150 });
+      this._apiLogs = res?.logs || [];
+    } catch (err) {
+      console.error("Failed to load API logs:", err);
+    } finally {
+      this._apiLogsLoading = false;
+      this._renderApiLogsView();
+    }
+  }
+
+  _renderApiLogsView() {
+    const slot = this.shadowRoot.getElementById("kb-api-logs-slot");
+    if (!slot) return;
+    const logs = this._apiLogs || [];
+    const filter = (this._apiLogFilter || "").toLowerCase().trim();
+    const filtered = filter
+      ? logs.filter((l) => (l.url || "").toLowerCase().includes(filter) || (l.method || "").toLowerCase().includes(filter) || String(l.status_code || "").includes(filter))
+      : logs;
+
+    slot.innerHTML = `
+      <div class="kb-card">
+        <div class="kb-card-header">
+          <div class="kb-title-wrap">
+            <div class="kb-badge-icon">LOG</div>
+            <div>
+              <div class="kb-title">Kickbase HTTP API Anfragen & Antworten (SQLite)</div>
+              <div class="kb-subtitle">
+                Alle Abfragen & von Kickbase erhaltene Daten · Klick auf einen Eintrag öffnet die vollständige JSON-Antwort
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input class="kb-input" id="kb-api-log-filter" type="search" placeholder="Endpunkt / Status filtern..." value="${escapeHtml(this._apiLogFilter)}"/>
+            <button class="kb-btn" id="kb-api-log-refresh">${this._apiLogsLoading ? "⏳ Lädt..." : "↻ Logs laden"}</button>
+          </div>
+        </div>
+
+        <div class="kb-list">
+          ${
+            this._apiLogsLoading && !logs.length
+              ? `<div class="kb-empty">Lade API-Logs aus der Datenbank...</div>`
+              : !filtered.length
+              ? `<div class="kb-empty">Keine API-Logs aufgezeichnet. Führe einen Sync aus oder filtere anders.</div>`
+              : filtered
+                  .map((l) => {
+                    const statusOk = Number(l.status_code) >= 200 && Number(l.status_code) < 300;
+                    const methodColor = l.method === "POST" ? "style='background:rgba(59,130,246,0.2);color:#93c5fd'" : "style='background:rgba(34,197,94,0.2);color:#86efac'";
+                    return `
+                      <div class="kb-row clickable" data-api-log-id="${l.id}">
+                        <div class="kb-row-left">
+                          <span class="kb-pill" ${methodColor}>${escapeHtml(l.method)}</span>
+                          <span class="kb-pill ${statusOk ? "ok" : "danger"}">${l.status_code}</span>
+                          <div class="kb-row-main">
+                            <div class="kb-row-name" style="font-family:monospace;font-size:12px">${escapeHtml(l.url)}</div>
+                            <div class="kb-row-meta">
+                              <span>⏱ ${l.duration_ms ?? 0} ms</span>
+                              <span>· 📅 ${formatDateTime(l.created_at)}</span>
+                              <span>· ${escapeHtml(l.response_preview || "")}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="kb-row-right">
+                          <button class="kb-btn" style="padding:4px 8px;font-size:11px">Inspect JSON ↗</button>
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join("")
+          }
+        </div>
+      </div>
+    `;
+
+    slot.querySelector("#kb-api-log-refresh")?.addEventListener("click", () => {
+      this._loadApiLogs();
+    });
+    slot.querySelector("#kb-api-log-filter")?.addEventListener("input", (e) => {
+      this._apiLogFilter = e.target.value;
+      this._renderApiLogsView();
+    });
+    slot.querySelectorAll("[data-api-log-id]").forEach((row) => {
+      row.addEventListener("click", () => {
+        this._showApiLogDetail(row.dataset.apiLogId);
+      });
+    });
+  }
+
+  async _showApiLogDetail(logId) {
+    let backdrop = this.shadowRoot.querySelector(".kb-modal-backdrop");
+    if (backdrop) backdrop.remove();
+
+    backdrop = document.createElement("div");
+    backdrop.className = "kb-modal-backdrop";
+    backdrop.innerHTML = `<div class="kb-modal"><div class="kb-empty">Lade vollständige Kickbase-Antwort #${logId}...</div></div>`;
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) backdrop.remove();
+    });
+    this.shadowRoot.appendChild(backdrop);
+
+    const modal = backdrop.querySelector(".kb-modal");
+    try {
+      const detail = await kickbaseStore.getRequestLogDetail(this._hass, { logId });
+      let prettyJson = detail.response_json || "{}";
+      try {
+        prettyJson = JSON.stringify(JSON.parse(prettyJson), null, 2);
+      } catch {
+        // raw
+      }
+
+      modal.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div>
+            <div class="kb-title" style="font-size:16px">${escapeHtml(detail.method)} ${escapeHtml(detail.url)}</div>
+            <div class="kb-subtitle">Status: ${detail.status_code} · Dauer: ${detail.duration_ms} ms · ${formatDateTime(detail.created_at)}</div>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button class="kb-btn" id="kb-copy-log-json">📋 Copy JSON</button>
+            <button class="kb-btn" id="kb-close-log-modal">✕</button>
+          </div>
+        </div>
+        <div style="background:#0a0d13;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:12px;max-height:65vh;overflow:auto">
+          <pre style="margin:0;font-family:monospace;font-size:12px;color:#a5f3fc;white-space:pre-wrap;word-break:break-all">${escapeHtml(prettyJson)}</pre>
+        </div>
+      `;
+      modal.querySelector("#kb-close-log-modal")?.addEventListener("click", () => backdrop.remove());
+      modal.querySelector("#kb-copy-log-json")?.addEventListener("click", (e) => {
+        navigator.clipboard.writeText(prettyJson).then(() => {
+          e.target.textContent = "✓ Copied!";
+          setTimeout(() => { e.target.textContent = "📋 Copy JSON"; }, 2000);
+        });
+      });
+    } catch (err) {
+      modal.innerHTML = `<div class="kb-empty">Fehler beim Laden des Logs: ${escapeHtml(err.message || String(err))}</div>`;
     }
   }
 
