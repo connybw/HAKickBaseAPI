@@ -810,7 +810,23 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
       const mv = data.market_value || {};
       const perfSeasons = data.performance || [];
       const latestSeason = perfSeasons[perfSeasons.length - 1] || {};
-      const ph = (latestSeason.ph || []).slice(-10);
+      const nowMs = Date.now();
+      const allPh = latestSeason.ph || [];
+      const playedPh = allPh.filter((d) => {
+        if (d.hp === true || d.cur === true) return true;
+        if (d.hp === false) {
+          if (Number(d.p) !== 0 || (d.mp && d.mp !== "0'")) return true;
+          return false;
+        }
+        if (d.md) {
+          const ts = Date.parse(d.md);
+          if (!Number.isNaN(ts)) return ts <= nowMs;
+        }
+        return true;
+      });
+      const ph = [...(playedPh.length ? playedPh : allPh)].sort(
+        (a, b) => Number(b.day || 0) - Number(a.day || 0)
+      );
       const history = (data.transfer_history || []).slice(0, 8);
       const statusHistory = (data.status_history || []).slice(0, 20);
       const pImg = playerImg(p);
@@ -900,11 +916,11 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
             ? `
           <div class="kb-chart-box">
             <div class="kb-kpi-label" style="margin-bottom:8px">Letzte Spieltage (${escapeHtml(latestSeason.ti || "")})</div>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(52px,1fr));gap:6px">
+            <div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;scrollbar-width:thin">
               ${ph
                 .map(
                   (d) => `
-                  <div class="kb-kpi" style="padding:6px;text-align:center">
+                  <div class="kb-kpi" style="flex:0 0 60px;padding:6px;text-align:center">
                     <div style="font-size:10px;color:var(--kb-muted)">ST ${escapeHtml(d.day)}</div>
                     <div style="font-size:14px;font-weight:800;color:${Number(d.p) >= 100 ? "var(--kb-green)" : Number(d.p) < 0 ? "var(--kb-red)" : "var(--kb-text)"}">${d.p ?? 0}</div>
                     <div style="font-size:10px;color:var(--kb-muted)">${escapeHtml(d.mp || "0'")}</div>
