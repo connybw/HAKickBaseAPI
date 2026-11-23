@@ -119,12 +119,17 @@ class TestKickbaseModels(unittest.TestCase):
             "mv": 50000000,
             "prc": 52000000,
             "exs": 1800,
+            "dt": "2020-01-01T00:00:00Z",
             "u": {"n": "Max"},
         }
         norm_m = normalize_player(market_raw, "https://cdn/")
         self.assertEqual(norm_m["id"], "9001")
         self.assertEqual(norm_m["owner_name"], "Max")
         self.assertEqual(norm_m["price"], 52000000)
+        self.assertEqual(norm_m["expiry_seconds"], 1800)
+        self.assertIsNotNone(norm_m["expiry_at"])
+        self.assertNotEqual(norm_m["expiry_at"], "2020-01-01T00:00:00Z")
+        self.assertGreater(datetime.fromisoformat(norm_m["expiry_at"]), datetime.now(UTC))
 
     def test_normalize_market_value_series(self) -> None:
         raw = {

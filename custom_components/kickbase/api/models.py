@@ -169,6 +169,12 @@ def normalize_player(
     mvt_code = raw.get("mvt")
     prob_raw = raw.get("prob") if raw.get("prob") is not None else raw.get("prb")
     starting_prob = decode_starting_prob(prob_raw, raw.get("ph"))
+    exs = raw.get("exs")
+    expiry_at = (
+        (datetime.now(UTC) + timedelta(seconds=int(exs))).isoformat()
+        if isinstance(exs, (int, float)) and not isinstance(exs, bool)
+        else None
+    )
 
     return {
         "id": player_id,
@@ -211,8 +217,8 @@ def normalize_player(
         "offer_count": raw.get("ofc", 0),
         "owner_user_id": str(raw.get("oui")) if raw.get("oui") is not None else None,
         "owner_name": raw.get("onm") or raw.get("u", {}).get("n") if isinstance(raw.get("u"), dict) else raw.get("onm"),
-        "expiry_seconds": raw.get("exs"),
-        "expiry_at": raw.get("dt"),
+        "expiry_seconds": exs,
+        "expiry_at": expiry_at,
         "match_id": str(raw.get("mi")) if raw.get("mi") is not None else None,
         "match_date": raw.get("md"),
         "match_status": raw.get("mst"),
