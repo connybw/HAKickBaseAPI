@@ -17,8 +17,8 @@ import {
   positionClass,
   startingProbBadge,
   teamImg,
-} from "./kickbase-shared.js?v=1.0.0";
-import "./kickbase-cards.js?v=1.0.0";
+} from "./kickbase-shared.js?v=1.0.1";
+import "./kickbase-cards.js?v=1.0.1";
 
 const PANEL_MODULES = [
   { id: "overview", label: "Manager & Budget", tag: "kickbase-overview-card", requires: "league_overview" },

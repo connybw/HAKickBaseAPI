@@ -812,18 +812,28 @@ export async function openKickbaseModal(shadowRoot, hass, kind, params) {
       const latestSeason = perfSeasons[perfSeasons.length - 1] || {};
       const nowMs = Date.now();
       const allPh = latestSeason.ph || [];
-      const playedPh = allPh.filter((d) => {
-        if (d.hp === true || d.cur === true) return true;
-        if (d.hp === false) {
-          if (Number(d.p) !== 0 || (d.mp && d.mp !== "0'")) return true;
-          return false;
-        }
-        if (d.md) {
-          const ts = Date.parse(d.md);
-          if (!Number.isNaN(ts)) return ts <= nowMs;
-        }
-        return true;
-      });
+      const hasMeta = allPh.some((d) => d.hp !== undefined || d.cur !== undefined || d.md);
+      let playedPh;
+      if (hasMeta) {
+        playedPh = allPh.filter((d) => {
+          if (d.hp === true || d.cur === true) return true;
+          if (d.hp === false) {
+            if (Number(d.p) !== 0 || (d.mp && d.mp !== "0'")) return true;
+            return false;
+          }
+          if (d.md) {
+            const ts = Date.parse(d.md);
+            if (!Number.isNaN(ts)) return ts <= nowMs;
+          }
+          return true;
+        });
+      } else {
+        const lastActiveDay = allPh.reduce((maxDay, d) => {
+          const active = Number(d.p) !== 0 || (d.mp && d.mp !== "0'");
+          return active ? Math.max(maxDay, Number(d.day || 0)) : maxDay;
+        }, 0);
+        playedPh = lastActiveDay > 0 ? allPh.filter((d) => Number(d.day || 0) <= lastActiveDay) : allPh;
+      }
       const ph = [...(playedPh.length ? playedPh : allPh)].sort(
         (a, b) => Number(b.day || 0) - Number(a.day || 0)
       );

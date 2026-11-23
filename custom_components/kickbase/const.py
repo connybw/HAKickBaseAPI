@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "kickbase"
 INTEGRATION_NAME: Final = "Kickbase"
-VERSION: Final = "1.0.0"
+VERSION: Final = "1.0.1"
 
 API_BASE_URL: Final = "https://api.kickbase.com"
 DEFAULT_IMAGE_BASE_URL: Final = "https://kickbase.b-cdn.net/"

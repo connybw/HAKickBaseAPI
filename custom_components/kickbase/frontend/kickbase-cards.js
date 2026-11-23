@@ -20,7 +20,7 @@ import {
   renderPitchHtml,
   startingProbBadge,
   teamImg,
-} from "./kickbase-shared.js?v=1.0.0";
+} from "./kickbase-shared.js?v=1.0.1";
 
 /* -------------------------------------------------------------------------- */
 /* Visual Lovelace Card Editor                                                */
